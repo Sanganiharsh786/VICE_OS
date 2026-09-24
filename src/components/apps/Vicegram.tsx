@@ -10,31 +10,28 @@ import {
   CAPTION_SEEDS,
   CRIMES,
   TAGS,
+  money,
   pick,
 } from "@/lib/copy";
+import { evaluate, TIER_TINT, type ContractCtx } from "@/lib/contracts";
 import { uid, useVice, type Comment, type Post } from "@/lib/store";
 import { readFile, useCameraRoll } from "@/lib/useCameraRoll";
 import EditorStage from "@/components/EditorStage";
 import { AppHeader, Btn, Chip, Stars, Tally } from "@/components/ui";
 
+type Frame = {
+  src: string;
+  title: string;
+  location: string;
+  /** Which camera-roll scene this came from — contracts can ask for one. */
+  sceneId?: string;
+};
+
 type Mode =
   | { k: "roll" }
-  | { k: "edit"; src: string; title: string; location: string }
-  | {
-      k: "scan";
-      src: string;
-      original: string;
-      title: string;
-      location: string;
-    }
-  | {
-      k: "compose";
-      src: string;
-      original: string;
-      title: string;
-      location: string;
-      forensics: Forensics;
-    }
+  | ({ k: "edit" } & Frame)
+  | ({ k: "scan"; original: string } & Frame)
+  | ({ k: "compose"; original: string; forensics: Forensics } & Frame)
   | { k: "feed" };
 
 /** How hard did the player scrub the frame? 0 = raw upload, 100 = unrecognisable. */
@@ -42,6 +39,19 @@ function scrubScore(f: Forensics) {
   return Math.max(
     0,
     Math.min(100, f.altered * 0.55 + f.coverage * 0.9 + (f.reframed ? 15 : 0)),
+  );
+}
+
+/**
+ * Heat a post will cost you. Lives here so the composer's projection and the
+ * number you actually take are always the same formula.
+ */
+function projectHeat(scrub: number, tags: string[]) {
+  const exposure =
+    TAGS.filter((t) => tags.includes(t.label)).reduce((a, t) => a + t.heat, 0) + 6;
+  return Math.max(
+    -6,
+    Math.round(exposure * (1 - scrub / 130) + (scrub < 8 ? 5 : -3)),
   );
 }
 
@@ -64,6 +74,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
       original: mode.src,
       title: mode.title,
       location: mode.location,
+      sceneId: mode.sceneId,
     });
     let forensics: Forensics;
     try {
@@ -86,6 +97,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
         original: mode.src,
         title: mode.title,
         location: mode.location,
+        sceneId: mode.sceneId,
         forensics,
       });
     }, 1900);
@@ -96,13 +108,9 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
     const f = mode.forensics;
     const scrub = scrubScore(f);
     const chosen = TAGS.filter((t) => tags.includes(t.label));
-    const exposure = chosen.reduce((a, t) => a + t.heat, 0) + 6;
     const reach = chosen.reduce((a, t) => a + t.reach, 0) + caption.length / 3;
 
-    const heatDelta = Math.max(
-      -6,
-      Math.round(exposure * (1 - scrub / 130) + (scrub < 8 ? 5 : -3)),
-    );
+    const heatDelta = projectHeat(scrub, tags);
     const likes = Math.round(
       (180 + reach * 26) * (0.7 + f.altered / 90) * (1 + Math.random() * 0.4),
     );
@@ -137,6 +145,32 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
 
     vice.dispatch({ type: "post", post });
     if (heatDelta > 10) vice.dispatch({ type: "crime", crime: pick(CRIMES) });
+
+    // If a contract is live, this post is the delivery.
+    const settled = vice.settleContract({
+      event: "post",
+      forensics: f,
+      scrub,
+      tags,
+      sceneId: mode.sceneId,
+      heatDelta,
+    });
+
+    if (settled) {
+      vice.toast(
+        settled.ok
+          ? {
+              kind: "cool",
+              title: `${settled.contract.codename} — PAID`,
+              body: `${money(settled.contract.reward)} from ${settled.contract.fixer}.`,
+            }
+          : {
+              kind: "alert",
+              title: `${settled.contract.codename} — BLOWN`,
+              body: "The export didn't hit the brief. No payout.",
+            },
+      );
+    }
 
     vice.toast(
       heatDelta > 0
@@ -254,6 +288,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
                       src: s.src,
                       title: s.title,
                       location: s.location,
+                      sceneId: s.id,
                     })
                   }
                   className="group relative aspect-4/5 overflow-hidden rounded-xl border border-white/10 bg-vice-plum text-left transition hover:border-vice-pink/70 hover:shadow-[0_0_30px_-8px_rgba(255,46,151,0.9)] disabled:cursor-wait"
@@ -331,12 +366,14 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
             tags={tags}
             setTags={setTags}
             onPublish={publish}
+            sceneId={mode.sceneId}
             onBackToEdit={() =>
               setMode({
                 k: "edit",
                 src: mode.original,
                 title: mode.title,
                 location: mode.location,
+                sceneId: mode.sceneId,
               })
             }
           />
@@ -415,6 +452,7 @@ function Composer({
   setCaption,
   tags,
   setTags,
+  sceneId,
   onPublish,
   onBackToEdit,
 }: {
@@ -424,6 +462,7 @@ function Composer({
   setCaption: (v: string) => void;
   tags: string[];
   setTags: (v: string[]) => void;
+  sceneId?: string;
   onPublish: () => void;
   onBackToEdit: () => void;
 }) {
@@ -435,8 +474,7 @@ function Composer({
         ? { t: "PARTIALLY SCRUBBED", c: "#22e6ff", s: "Recognisable, but you covered the worst of it." }
         : { t: "RAW FRAME", c: "#ff3b30", s: "Everything in this shot is admissible. Your call." };
 
-  const chosen = TAGS.filter((t) => tags.includes(t.label));
-  const projected = chosen.reduce((a, t) => a + t.heat, 0) + 6;
+  const projected = projectHeat(scrub, tags);
 
   return (
     <div className="p-4 pb-6 rise-in">
@@ -512,17 +550,79 @@ function Composer({
         </div>
       </div>
 
+      <ContractCheck
+        ctx={{
+          event: "post",
+          forensics,
+          scrub,
+          tags,
+          sceneId,
+          heatDelta: projected,
+        }}
+      />
+
       <div className="mt-5 flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2.5">
         <div>
           <p className="font-mono text-[9px] tracking-[0.2em] text-white/40">
             PROJECTED EXPOSURE
           </p>
-          <p className="font-mono text-lg tabular-nums text-vice-pink">
-            +{Math.max(0, Math.round(projected * (1 - scrub / 130)))} HEAT
+          <p
+            className={`font-mono text-lg tabular-nums ${projected > 0 ? "text-vice-pink" : "text-vice-lime"}`}
+          >
+            {projected > 0 ? "+" : ""}
+            {projected} HEAT
           </p>
         </div>
         <Btn onClick={onPublish}>POST IT</Btn>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Live read on the active contract while the player is still in the composer,
+ * so they can go back to the editor before they burn the job.
+ */
+function ContractCheck({ ctx }: { ctx: ContractCtx }) {
+  const { active } = useVice();
+  if (!active || active.contract.event !== "post") return null;
+
+  const c = active.contract;
+  const marks = evaluate(c, ctx);
+  const met = marks.filter(Boolean).length;
+  const all = met === marks.length;
+  const tint = all ? "#9dff3d" : TIER_TINT[c.tier];
+
+  return (
+    <div
+      className="mt-5 rounded-xl border p-3"
+      style={{ borderColor: `${tint}55`, background: `${tint}0d` }}
+    >
+      <div className="flex items-center justify-between">
+        <p className="font-mono text-[9px] tracking-[0.22em]" style={{ color: tint }}>
+          CONTRACT · {c.codename}
+        </p>
+        <p className="font-mono text-[10px] tabular-nums text-white/60">
+          {met}/{marks.length}
+        </p>
+      </div>
+      <ul className="mt-2 space-y-1">
+        {c.objectives.map((o, i) => (
+          <li key={o.label} className="flex items-start gap-2 text-[11px] leading-snug">
+            <span className={marks[i] ? "text-vice-lime" : "text-white/25"}>
+              {marks[i] ? "✓" : "○"}
+            </span>
+            <span className={marks[i] ? "text-white/80" : "text-white/45"}>
+              {o.label}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 font-mono text-[9px] leading-relaxed tracking-[0.12em] text-white/35">
+        {all
+          ? `POST IT AND ${c.fixer} PAYS ${money(c.reward)}.`
+          : "POSTING NOW BLOWS THE JOB — GO BACK TO THE IMAGE LAB."}
+      </p>
     </div>
   );
 }

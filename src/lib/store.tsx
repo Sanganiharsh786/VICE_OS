@@ -7,10 +7,18 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   type ReactNode,
 } from "react";
 import type { Forensics } from "./art";
 import { FIRST_NAMES, LAST_NAMES, pick } from "./copy";
+import {
+  evaluate,
+  rollBoard,
+  type Contract,
+  type ContractCtx,
+  type ContractResult,
+} from "./contracts";
 
 export type Comment = {
   id: string;
@@ -56,6 +64,17 @@ export type State = {
   booted: boolean;
   /** False until localStorage has been read — nothing is written before then. */
   ready: boolean;
+
+  /* ---- contracts ---- */
+  cash: number;
+  /** The three offers currently on the board. Session-only. */
+  board: Contract[];
+  /** The job you took, with the wall-clock deadline it has to land by. */
+  active: { contract: Contract; deadline: number } | null;
+  completed: number;
+  failed: number;
+  /** Last settlement, so the app can show a payout screen. */
+  lastResult: ContractResult | null;
 };
 
 type Action =
@@ -70,6 +89,10 @@ type Action =
   | { type: "toast"; toast: Toast }
   | { type: "untoast"; id: string }
   | { type: "hydrate"; state: Partial<State> }
+  | { type: "board"; board: Contract[] }
+  | { type: "accept"; contract: Contract; deadline: number }
+  | { type: "settle"; result: ContractResult }
+  | { type: "clearResult" }
   | { type: "wipe" };
 
 export const STAR_STEPS = [0, 12, 30, 50, 72, 90];
@@ -97,6 +120,12 @@ function initial(): State {
     toasts: [],
     booted: false,
     ready: false,
+    cash: 240,
+    board: [],
+    active: null,
+    completed: 0,
+    failed: 0,
+    lastResult: null,
   };
 }
 
@@ -142,6 +171,29 @@ function reducer(state: State, action: Action): State {
       return { ...state, toasts: state.toasts.filter((t) => t.id !== action.id) };
     case "hydrate":
       return { ...state, ...action.state, ready: true };
+    case "board":
+      return { ...state, board: action.board };
+    case "accept":
+      return {
+        ...state,
+        active: { contract: action.contract, deadline: action.deadline },
+        board: state.board.filter((c) => c.id !== action.contract.id),
+        lastResult: null,
+      };
+    case "settle": {
+      const { ok, paid, heat } = action.result;
+      return {
+        ...state,
+        active: null,
+        lastResult: action.result,
+        cash: Math.max(0, state.cash + paid),
+        heat: clamp(state.heat + heat),
+        completed: state.completed + (ok ? 1 : 0),
+        failed: state.failed + (ok ? 0 : 1),
+      };
+    }
+    case "clearResult":
+      return { ...state, lastResult: null };
     case "wipe":
       return {
         ...initial(),
@@ -172,6 +224,16 @@ type Store = State & {
   toast: (t: Omit<Toast, "id">) => void;
   starCount: number;
   bountyValue: number;
+  /** Take a job. The clock starts now. */
+  accept: (c: Contract) => void;
+  /** Walk away — costs a fail, but no heat. */
+  abandon: () => void;
+  refreshBoard: () => void;
+  /**
+   * Called by the apps whenever the player finishes something a contract
+   * could be about. Returns the settlement if this event closed a job.
+   */
+  settleContract: (ctx: ContractCtx) => ContractResult | null;
 };
 
 const Ctx = createContext<Store | null>(null);
@@ -199,6 +261,9 @@ export function ViceProvider({ children }: { children: ReactNode }) {
             heat: saved.heat,
             crimes: saved.crimes ?? [],
             followers: saved.followers,
+            cash: saved.cash,
+            completed: saved.completed,
+            failed: saved.failed,
           },
         });
       } else {
@@ -221,6 +286,9 @@ export function ViceProvider({ children }: { children: ReactNode }) {
           heat: state.heat,
           crimes: state.crimes,
           followers: state.followers,
+          cash: state.cash,
+          completed: state.completed,
+          failed: state.failed,
         }),
       );
     } catch {
@@ -233,6 +301,9 @@ export function ViceProvider({ children }: { children: ReactNode }) {
     state.heat,
     state.crimes,
     state.followers,
+    state.cash,
+    state.completed,
+    state.failed,
   ]);
 
   const toast = useCallback((t: Omit<Toast, "id">) => {
@@ -241,6 +312,100 @@ export function ViceProvider({ children }: { children: ReactNode }) {
     setTimeout(() => dispatch({ type: "untoast", id }), 4200);
   }, []);
 
+  /* ---------------- contracts ---------------- */
+
+  // settleContract and the deadline watchdog both need the live job and the
+  // live heat without re-creating themselves on every render, so both are
+  // mirrored into refs after each commit.
+  const heatRef = useRef(state.heat);
+  const activeRef = useRef(state.active);
+  useEffect(() => {
+    heatRef.current = state.heat;
+    activeRef.current = state.active;
+  }, [state.heat, state.active]);
+
+  const refreshBoard = useCallback(() => {
+    dispatch({
+      type: "board",
+      board: rollBoard({ bounty: bounty(heatRef.current) }),
+    });
+  }, []);
+
+  useEffect(() => {
+    if (state.ready && state.board.length === 0 && !state.active) refreshBoard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.ready]);
+
+  const accept = useCallback((c: Contract) => {
+    dispatch({
+      type: "accept",
+      contract: c,
+      deadline: Date.now() + c.seconds * 1000,
+    });
+  }, []);
+
+  const settle = useCallback(
+    (
+      contract: Contract,
+      marks: boolean[],
+      reason: ContractResult["reason"],
+    ): ContractResult => {
+      const ok = reason === "delivered";
+      const result: ContractResult = {
+        contract,
+        ok,
+        marks,
+        reason,
+        paid: ok ? contract.reward : 0,
+        heat: ok ? contract.heatOnSuccess : contract.heatOnFail,
+      };
+      dispatch({ type: "settle", result });
+      return result;
+    },
+    [],
+  );
+
+  const settleContract = useCallback(
+    (ctx: ContractCtx) => {
+      const job = activeRef.current;
+      if (!job || job.contract.event !== ctx.event) return null;
+      const marks = evaluate(job.contract, ctx);
+      const ok = marks.every(Boolean);
+      return settle(job.contract, marks, ok ? "delivered" : "missed");
+    },
+    [settle],
+  );
+
+  const abandon = useCallback(() => {
+    const job = activeRef.current;
+    if (!job) return;
+    settle(
+      job.contract,
+      job.contract.objectives.map(() => false),
+      "missed",
+    );
+  }, [settle]);
+
+  // Deadline watchdog.
+  useEffect(() => {
+    if (!state.active) return;
+    const t = setInterval(() => {
+      const job = activeRef.current;
+      if (!job || Date.now() < job.deadline) return;
+      settle(
+        job.contract,
+        job.contract.objectives.map(() => false),
+        "expired",
+      );
+      toast({
+        kind: "alert",
+        title: "CONTRACT EXPIRED",
+        body: `${job.contract.fixer} stopped answering. +${job.contract.heatOnFail} heat.`,
+      });
+    }, 500);
+    return () => clearInterval(t);
+  }, [state.active, settle, toast]);
+
   const value = useMemo<Store>(
     () => ({
       ...state,
@@ -248,8 +413,12 @@ export function ViceProvider({ children }: { children: ReactNode }) {
       toast,
       starCount: stars(state.heat),
       bountyValue: bounty(state.heat),
+      accept,
+      abandon,
+      refreshBoard,
+      settleContract,
     }),
-    [state, toast],
+    [state, toast, accept, abandon, refreshBoard, settleContract],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

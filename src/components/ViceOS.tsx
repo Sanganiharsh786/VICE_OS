@@ -9,11 +9,30 @@ import Vicegram from "@/components/apps/Vicegram";
 import MostWanted from "@/components/apps/MostWanted";
 import LeonidaID from "@/components/apps/LeonidaID";
 import Scanner from "@/components/apps/Scanner";
+import Contracts, { clock, useCountdown } from "@/components/apps/Contracts";
+import { rankFor, TIER_TINT } from "@/lib/contracts";
 import { HeatMeter, Panel, Stars } from "@/components/ui";
 
-type Screen = "boot" | "lock" | "home" | "vicegram" | "wanted" | "id" | "scanner";
+type Screen =
+  | "boot"
+  | "lock"
+  | "home"
+  | "vicegram"
+  | "wanted"
+  | "id"
+  | "scanner"
+  | "contracts";
 
 const APPS = [
+  {
+    id: "contracts" as const,
+    name: "THE FIXER",
+    sub: "contracts · payouts",
+    glyph: "✎",
+    from: "#ffb347",
+    to: "#ff2e97",
+    wide: true,
+  },
   {
     id: "vicegram" as const,
     name: "VICEGRAM",
@@ -72,7 +91,17 @@ export default function ViceOS() {
       <div className="relative z-10 mx-auto flex h-full max-w-[1500px] items-center justify-center gap-8 px-4 xl:gap-12">
         <SidePanelLeft />
 
-        <Phone alarm={alarm}>
+        <Phone
+          alarm={alarm}
+          hud={
+            screen !== "boot" && screen !== "lock" ? (
+              <ContractHUD
+                active={screen === "contracts"}
+                onOpen={() => setScreen("contracts")}
+              />
+            ) : null
+          }
+        >
           {screen === "boot" && <Boot onDone={() => setScreen("lock")} />}
           {screen === "lock" && (
             <Lock wallpaper={wallpaper} onUnlock={() => setScreen("home")} />
@@ -88,6 +117,12 @@ export default function ViceOS() {
           {screen === "wanted" && <MostWanted onBack={() => setScreen("home")} />}
           {screen === "id" && <LeonidaID onBack={() => setScreen("home")} />}
           {screen === "scanner" && <Scanner onBack={() => setScreen("home")} />}
+          {screen === "contracts" && (
+            <Contracts
+              onBack={() => setScreen("home")}
+              onJump={(t) => setScreen(t)}
+            />
+          )}
 
           <Toasts />
         </Phone>
@@ -102,7 +137,15 @@ export default function ViceOS() {
 /* phone shell                                                         */
 /* ------------------------------------------------------------------ */
 
-function Phone({ children, alarm }: { children: React.ReactNode; alarm: boolean }) {
+function Phone({
+  children,
+  alarm,
+  hud,
+}: {
+  children: React.ReactNode;
+  alarm: boolean;
+  hud?: React.ReactNode;
+}) {
   return (
     <div className="relative shrink-0">
       <div
@@ -115,6 +158,7 @@ function Phone({ children, alarm }: { children: React.ReactNode; alarm: boolean 
       <div className="relative h-[min(90dvh,860px)] w-[min(94vw,392px)] rounded-[2.75rem] border border-white/15 bg-gradient-to-b from-white/15 to-white/5 p-[3px] shadow-[0_40px_120px_-30px_rgba(0,0,0,0.9)]">
         <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[2.6rem] bg-vice-void">
           <StatusBar />
+          {hud}
           <div className="relative flex-1 overflow-hidden">{children}</div>
           <div className="flex justify-center py-2">
             <div className="h-1 w-28 rounded-full bg-white/25" />
@@ -156,6 +200,57 @@ function StatusBar() {
         <span className="text-[11px] text-white/60">▮</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * A live contract has to be visible from inside whichever app you're using,
+ * so the clock rides just under the status bar everywhere but boot/lock.
+ */
+function ContractHUD({
+  active,
+  onOpen,
+}: {
+  active: boolean;
+  onOpen: () => void;
+}) {
+  const { active: job } = useVice();
+  const left = useCountdown(job?.deadline ?? 0);
+  if (!job) return null;
+
+  const c = job.contract;
+  const frac = Math.max(0, Math.min(1, left / (c.seconds * 1000)));
+  const panic = left < 25000;
+  const tint = panic ? "#ff3b30" : TIER_TINT[c.tier];
+
+  return (
+    <button
+      onClick={onOpen}
+      disabled={active}
+      className="relative z-30 mx-3 mb-1 flex items-center gap-2 overflow-hidden rounded-lg border bg-black/50 px-2.5 py-1.5 text-left disabled:cursor-default"
+      style={{ borderColor: `${tint}55` }}
+    >
+      <div
+        className="absolute inset-y-0 left-0 opacity-15 transition-[width] duration-200"
+        style={{ width: `${frac * 100}%`, background: tint }}
+      />
+      <span
+        className={`relative h-1.5 w-1.5 shrink-0 rounded-full ${panic ? "flicker" : ""}`}
+        style={{ background: tint, boxShadow: `0 0 8px ${tint}` }}
+      />
+      <span className="relative min-w-0 flex-1 truncate font-mono text-[9px] tracking-[0.16em] text-white/70">
+        {c.codename}
+        <span className="ml-1.5 text-white/35">
+          {c.objectives.length} OBJ · {c.event === "poster" ? "BULLETIN" : "POST"}
+        </span>
+      </span>
+      <span
+        className="relative font-mono text-[11px] tabular-nums"
+        style={{ color: tint }}
+      >
+        {clock(left)}
+      </span>
+    </button>
   );
 }
 
@@ -252,6 +347,22 @@ function Lock({
   );
 }
 
+/** Little counter on the Fixer tile: jobs waiting, or the live one. */
+function JobBadge() {
+  const { board, active } = useVice();
+  return (
+    <span
+      className={`shrink-0 rounded-full px-2 py-0.5 font-mono text-[9px] tracking-[0.12em] ${
+        active
+          ? "bg-vice-blood/20 text-vice-blood"
+          : "bg-vice-sun/20 text-vice-sun"
+      }`}
+    >
+      {active ? "ON A JOB" : `${board.length} OPEN`}
+    </span>
+  );
+}
+
 function Home({
   wallpaper,
   onOpen,
@@ -303,18 +414,27 @@ function Home({
             <button
               key={a.id}
               onClick={() => onOpen(a.id)}
-              className="group rounded-2xl border border-white/10 bg-black/40 p-3 text-left transition hover:-translate-y-0.5 hover:border-white/30"
+              className={`group rounded-2xl border border-white/10 bg-black/40 p-3 text-left transition hover:-translate-y-0.5 hover:border-white/30 ${
+                "wide" in a && a.wide ? "col-span-2 flex items-center gap-3" : ""
+              }`}
             >
               <div
-                className="flex h-12 w-12 items-center justify-center rounded-xl text-xl text-vice-void shadow-lg transition group-hover:scale-105"
+                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl text-xl text-vice-void shadow-lg transition group-hover:scale-105"
                 style={{ background: `linear-gradient(135deg, ${a.from}, ${a.to})` }}
               >
                 {a.glyph}
               </div>
-              <p className="mt-2.5 text-[12px] font-bold tracking-wide">{a.name}</p>
-              <p className="font-mono text-[9px] tracking-[0.12em] text-white/40">
-                {a.sub}
-              </p>
+              <div className={"wide" in a && a.wide ? "min-w-0 flex-1" : ""}>
+                <p
+                  className={`text-[12px] font-bold tracking-wide ${"wide" in a && a.wide ? "" : "mt-2.5"}`}
+                >
+                  {a.name}
+                </p>
+                <p className="font-mono text-[9px] tracking-[0.12em] text-white/40">
+                  {a.sub}
+                </p>
+              </div>
+              {"wide" in a && a.wide && <JobBadge />}
             </button>
           ))}
         </div>
@@ -433,6 +553,11 @@ function SidePanelLeft() {
             <span className="font-mono text-vice-pink">04</span> Post it. Heat goes up,
             bounty goes up, the poster prints itself.
           </li>
+          <li>
+            <span className="font-mono text-vice-sun">05</span> Or take a contract from{" "}
+            <span className="text-vice-sun">THE FIXER</span> — a timed job graded
+            purely on what the forensic scan finds in your export.
+          </li>
         </ol>
       </Panel>
 
@@ -444,7 +569,8 @@ function SidePanelLeft() {
 }
 
 function SidePanelRight() {
-  const { posts, crimes, followers, bountyValue, alias } = useVice();
+  const { posts, crimes, followers, bountyValue, alias, cash, completed } =
+    useVice();
   const [feed, setFeed] = useState<string[]>([]);
 
   useEffect(() => {
@@ -461,8 +587,10 @@ function SidePanelRight() {
       { k: "FOLLOWERS", v: followers.toLocaleString() },
       { k: "CHARGES", v: crimes.length.toString() },
       { k: "BOUNTY", v: money(bountyValue) },
+      { k: "ON HAND", v: money(cash) },
+      { k: "RANK", v: rankFor(completed) },
     ],
-    [posts.length, followers, crimes.length, bountyValue],
+    [posts.length, followers, crimes.length, bountyValue, cash, completed],
   );
 
   return (

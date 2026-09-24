@@ -27,6 +27,16 @@ function StageSkeleton() {
 /** Hoisted so a re-render never hands the editor a fresh options object. */
 const EDITOR_OPTIONS = { theme: "dark" } as const;
 
+/** The editor's own Save control, located by label inside our container. */
+function findSaveButton(root: HTMLElement | null) {
+  if (!root) return null;
+  return (
+    [...root.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim().toLowerCase() === "save",
+    ) ?? null
+  );
+}
+
 export type StageMission = {
   /** Big label for what the player is editing. */
   title: string;
@@ -71,6 +81,7 @@ export default function EditorStage({
   onCancel: () => void;
 }) {
   const ref = useRef<ImageEditorRef>(null);
+  const stage = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const [touched, setTouched] = useState(false);
   const accent = ACCENTS[mission.accent];
@@ -97,10 +108,30 @@ export default function EditorStage({
     return () => window.removeEventListener("keydown", onKey);
   }, [onCancel]);
 
+  /**
+   * Hand the edit back to the app.
+   *
+   * Called with a dataUrl by the editor's own onSave. Called bare by our
+   * commit button, and that path deliberately routes through the editor's
+   * Save control rather than getImage(): getImage() returns the working
+   * canvas *before* the active filter preset is baked in, so a
+   * filter-only edit would come back byte-identical to the original and
+   * the forensic diff would read 0%.
+   */
   const commit = (dataUrl?: string | null) => {
-    const out = dataUrl ?? ref.current?.editor?.getImage();
-    if (!out) return;
-    onCommit(out);
+    if (dataUrl) {
+      onCommit(dataUrl);
+      return;
+    }
+    const save = findSaveButton(stage.current);
+    if (save) {
+      save.click();
+      return;
+    }
+    // The editor's markup changed out from under us — fall back to the
+    // flattened canvas so the player never gets stuck in the lab.
+    const out = ref.current?.editor?.getImage();
+    if (out) onCommit(out);
   };
 
   return (
@@ -162,7 +193,10 @@ export default function EditorStage({
 
       {/* the editor */}
       <div className="relative z-10 flex-1 overflow-hidden p-2 sm:p-4">
-        <div className="relative h-full w-full overflow-hidden rounded-2xl border border-white/10 bg-black/40">
+        <div
+          ref={stage}
+          className="relative h-full w-full overflow-hidden rounded-2xl border border-white/10 bg-black/40"
+        >
           <ImageEditor
             ref={ref}
             image={image}

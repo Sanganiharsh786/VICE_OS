@@ -47,6 +47,27 @@ export default function MostWanted({ onBack }: { onBack: () => void }) {
         caseNo,
       });
       setTimeout(() => setMode({ k: "poster", src: poster }), 900);
+
+      // A printed bulletin closes out any "VANITY PRESS" style contract.
+      const settled = vice.settleContract({
+        event: "poster",
+        bounty: vice.bountyValue,
+      });
+      if (settled) {
+        vice.toast(
+          settled.ok
+            ? {
+                kind: "cool",
+                title: `${settled.contract.codename} — PAID`,
+                body: `${money(settled.contract.reward)} for the bulletin.`,
+              }
+            : {
+                kind: "alert",
+                title: `${settled.contract.codename} — BLOWN`,
+                body: `Bounty came in at ${money(vice.bountyValue)}. Not enough.`,
+              },
+        );
+      }
     } catch {
       setMode({ k: "pick" });
       vice.toast({ kind: "alert", title: "PRINT FAILED", body: "The plotter jammed." });

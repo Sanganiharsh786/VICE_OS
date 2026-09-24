@@ -30,14 +30,38 @@ camera roll → IMAGE LAB (React Image Editor) → forensic diff → caption + t
                                     heat ↑↓ → stars → bounty → wanted poster
 ```
 
-## Four apps, three of them built on the editor
+## Five apps, three of them built on the editor
 
 | App | What you edit | What comes out |
 | --- | --- | --- |
+| **THE FIXER** | — | Timed contracts scored **entirely on the forensic diff of your export**: payouts, heat swings, a rank and a ledger |
 | **VICEGRAM** | A shot from the procedurally painted camera roll, or your own photo | A post, a forensics report, and a change to your heat |
 | **MOST WANTED** | A deliberately faceless booking plate — *you* paint the suspect | A composited WANTED bulletin with your live bounty, rap sheet and stars, downloadable as PNG |
 | **LEONIDA DMV** | Your license portrait | A holographic state ID card with guilloche print, ghost portrait and a generated signature, downloadable as PNG |
 | **SCANNER 7** | — | Radio + LSO dispatch whose chatter rate scales with your heat, plus a "lay low" cooldown to cool off |
+
+## Contracts: the editor gets a scoreboard
+
+A fixer wants a photo handled a specific way, and the only thing that decides whether you
+delivered is what the forensic scan finds in your export
+([`src/lib/contracts.ts`](src/lib/contracts.ts)):
+
+> **THE CLEANER** — *"I don't care what it looks like when you're done. I care that nobody
+> can match it to the frame it came from."* · Scrub rating 66% or higher · 150s · $9,850 · **-7 heat**
+
+Nine job templates roll against your current heat, so the board is never impossible and never
+free. Objectives map one-to-one onto editor tools — `coverage` wants stickers and shapes,
+`grade shift` wants the filter panel, `reframe` wants crop or resize, and **GHOST POST** wants
+you to publish without moving the needle a single degree.
+
+- A live countdown rides under the status bar in **every** app, so you can feel the clock
+  while you're inside the Image Lab.
+- The composer shows the contract scorecard *before* you publish — `1/2 objectives met`,
+  with "posting now blows the job" — so you can go back and keep editing.
+- Delivering pays cash and usually cools you off; blowing it or running out the clock adds
+  heat. Rank climbs RUNNER → EARNER → OPERATOR → FIXER → KINGPIN.
+- **VANITY PRESS** settles against a printed bulletin instead of a post, so the contract
+  system spans two of the three editor surfaces.
 
 ## How the React Image Editor is used
 
@@ -49,8 +73,11 @@ out into, wrapped in its own OS chrome ([`src/components/EditorStage.tsx`](src/c
   three different in-world machines.
 - **Live state in the chrome.** The wrapper polls `ref.current.editor.hasChanges()` and shows
   `ORIGINAL FRAME` / `UNSAVED EDITS` in the header.
-- **Two ways to commit.** The editor's own `onSave({ dataUrl })`, and the OS chrome's commit
-  button which pulls `ref.current.editor.getImage()` — both land in the same handler.
+- **Two ways to commit, one export.** The editor's own Save fires `onSave({ dataUrl })`; the
+  OS chrome's commit button drives that same control so both produce an identical flattened
+  export. (`getImage()` returns the working canvas *before* the active filter preset is baked
+  in — a filter-only edit would otherwise come back byte-identical and read 0% on the
+  forensic diff. It's kept as a fallback so the player can never get stuck in the lab.)
 - **`onCancel`, `onLoadError`, `onError`** are all wired; `Escape` discards.
 - Mounted through `next/dynamic` with a themed skeleton, `options` hoisted to a module
   constant so a re-render never triggers a remount.
@@ -107,12 +134,13 @@ npm run build && npm start
 
 ## Try this first
 
-1. Let it boot, tap to unlock, open **VICEGRAM**.
-2. Pick *Ocean Drive, 7:41 PM* → the Image Lab opens.
+1. Let it boot, tap to unlock, open **THE FIXER** and take a contract — the clock starts.
+2. Hit **OPEN VICEGRAM**, pick a shot → the Image Lab opens.
 3. Drop a sticker over the frame, push a filter, maybe crop it.
-4. Hit **RUN FORENSICS** and watch the scan score your edit.
-5. Tag it `#trunkfull`, post it, and watch heat, stars, bounty and the dispatch feed react.
-6. Open **MOST WANTED**, paint a face on the blank booking plate, and print your bulletin.
+4. Hit **RUN FORENSICS** and watch the scan score your edit against the brief.
+5. Check the scorecard in the composer. Not there yet? Go back to the lab before you post.
+6. Post it, collect the payout, and watch heat, stars, bounty and the dispatch feed react.
+7. Open **MOST WANTED**, paint a face on the blank booking plate, and print your bulletin.
 
 ## Project layout
 
@@ -124,11 +152,12 @@ src/
     EditorStage.tsx the Image Lab — the React Image Editor wrapper
     Backdrop.tsx    animated Leonida sunset
     ui.tsx          stars, heat meter, buttons, panels
-    apps/           Vicegram, MostWanted, LeonidaID, Scanner
+    apps/           Contracts, Vicegram, MostWanted, LeonidaID, Scanner
   lib/
     art.ts          procedural scenes, booking plates, forensic diff
     compose.ts      WANTED bulletin + Leonida ID compositors
-    store.tsx       heat / stars / bounty / posts state
+    contracts.ts    job templates, objectives, scoring
+    store.tsx       heat / stars / bounty / posts / contracts state
     copy.ts         all in-world writing
 ```
 
@@ -136,8 +165,8 @@ src/
 
 - `prefers-reduced-motion` disables the strobes, sweeps, grain and marquees.
 - Works on mobile — the phone fills the viewport and the Image Lab goes full-screen.
-- Heat, alias and charges persist in `localStorage`; photos stay in memory only, so the
-  storage quota is never at risk.
+- Heat, alias, charges, cash and your job record persist in `localStorage`; photos and the
+  live contract stay in memory only, so the storage quota is never at risk.
 - Names, places, characters and jokes are original. Nothing from Rockstar's assets is used
   or reproduced; this is an unofficial fan concept and is not affiliated with Rockstar Games.
 
