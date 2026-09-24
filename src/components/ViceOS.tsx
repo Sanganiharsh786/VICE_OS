@@ -1,0 +1,516 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { renderScene } from "@/lib/art";
+import { BOOT_LINES, DISPATCH, money, pick } from "@/lib/copy";
+import { useVice } from "@/lib/store";
+import Backdrop from "@/components/Backdrop";
+import Vicegram from "@/components/apps/Vicegram";
+import MostWanted from "@/components/apps/MostWanted";
+import LeonidaID from "@/components/apps/LeonidaID";
+import Scanner from "@/components/apps/Scanner";
+import { HeatMeter, Panel, Stars } from "@/components/ui";
+
+type Screen = "boot" | "lock" | "home" | "vicegram" | "wanted" | "id" | "scanner";
+
+const APPS = [
+  {
+    id: "vicegram" as const,
+    name: "VICEGRAM",
+    sub: "shoot · edit · post",
+    glyph: "◉",
+    from: "#ff2e97",
+    to: "#ff8a3c",
+  },
+  {
+    id: "wanted" as const,
+    name: "MOST WANTED",
+    sub: "your bulletin",
+    glyph: "★",
+    from: "#22e6ff",
+    to: "#2f6bff",
+  },
+  {
+    id: "id" as const,
+    name: "LEONIDA DMV",
+    sub: "state ID kiosk",
+    glyph: "▤",
+    from: "#9dff3d",
+    to: "#1fb87a",
+  },
+  {
+    id: "scanner" as const,
+    name: "SCANNER 7",
+    sub: "radio · dispatch",
+    glyph: "≋",
+    from: "#ffb347",
+    to: "#ff5f6d",
+  },
+];
+
+export default function ViceOS() {
+  const vice = useVice();
+  const [screen, setScreen] = useState<Screen>("boot");
+  const [wallpaper, setWallpaper] = useState<string | null>(null);
+  const alarm = vice.starCount >= 4;
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try {
+        setWallpaper(renderScene("ocean-drive", 42));
+      } catch {
+        /* no canvas, live with the gradient */
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <main className="relative h-dvh w-full overflow-hidden">
+      <Backdrop alarm={alarm} />
+
+      <div className="relative z-10 mx-auto flex h-full max-w-[1500px] items-center justify-center gap-8 px-4 xl:gap-12">
+        <SidePanelLeft />
+
+        <Phone alarm={alarm}>
+          {screen === "boot" && <Boot onDone={() => setScreen("lock")} />}
+          {screen === "lock" && (
+            <Lock wallpaper={wallpaper} onUnlock={() => setScreen("home")} />
+          )}
+          {screen === "home" && (
+            <Home
+              wallpaper={wallpaper}
+              onOpen={(id) => setScreen(id)}
+              onLock={() => setScreen("lock")}
+            />
+          )}
+          {screen === "vicegram" && <Vicegram onBack={() => setScreen("home")} />}
+          {screen === "wanted" && <MostWanted onBack={() => setScreen("home")} />}
+          {screen === "id" && <LeonidaID onBack={() => setScreen("home")} />}
+          {screen === "scanner" && <Scanner onBack={() => setScreen("home")} />}
+
+          <Toasts />
+        </Phone>
+
+        <SidePanelRight />
+      </div>
+    </main>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* phone shell                                                         */
+/* ------------------------------------------------------------------ */
+
+function Phone({ children, alarm }: { children: React.ReactNode; alarm: boolean }) {
+  return (
+    <div className="relative shrink-0">
+      <div
+        className={`pointer-events-none absolute -inset-6 rounded-[4rem] blur-2xl transition-colors duration-700 ${
+          alarm
+            ? "bg-[conic-gradient(from_0deg,rgba(255,59,48,0.5),rgba(34,120,255,0.5),rgba(255,59,48,0.5))]"
+            : "bg-[conic-gradient(from_0deg,rgba(255,46,151,0.35),rgba(34,230,255,0.3),rgba(255,46,151,0.35))]"
+        }`}
+      />
+      <div className="relative h-[min(90dvh,860px)] w-[min(94vw,392px)] rounded-[2.75rem] border border-white/15 bg-gradient-to-b from-white/15 to-white/5 p-[3px] shadow-[0_40px_120px_-30px_rgba(0,0,0,0.9)]">
+        <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[2.6rem] bg-vice-void">
+          <StatusBar />
+          <div className="relative flex-1 overflow-hidden">{children}</div>
+          <div className="flex justify-center py-2">
+            <div className="h-1 w-28 rounded-full bg-white/25" />
+          </div>
+          <div className="scanlines pointer-events-none absolute inset-0 rounded-[2.6rem]" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatusBar() {
+  const { starCount, heat } = useVice();
+  const [now, setNow] = useState("");
+  useEffect(() => {
+    const tick = () =>
+      setNow(
+        new Date().toLocaleTimeString("en-US", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }),
+      );
+    tick();
+    const t = setInterval(tick, 10000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="relative z-30 flex items-center justify-between px-5 pb-1 pt-3">
+      <span className="font-mono text-[11px] tabular-nums">{now || "--:--"}</span>
+      <div className="absolute left-1/2 top-2 h-6 w-24 -translate-x-1/2 rounded-full bg-black" />
+      <div className="flex items-center gap-2">
+        <Stars count={starCount} size={11} />
+        <span
+          className={`font-mono text-[10px] ${heat > 60 ? "text-vice-blood" : "text-white/45"}`}
+        >
+          {heat}°
+        </span>
+        <span className="text-[11px] text-white/60">▮</span>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* boot / lock / home                                                  */
+/* ------------------------------------------------------------------ */
+
+function Boot({ onDone }: { onDone: () => void }) {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    if (i >= BOOT_LINES.length) {
+      const t = setTimeout(onDone, 550);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => setI((v) => v + 1), i === 0 ? 420 : 210);
+    return () => clearTimeout(t);
+  }, [i, onDone]);
+
+  return (
+    <div className="flex h-full flex-col justify-end p-5 pb-10">
+      <div className="mb-auto mt-10 text-center">
+        <p className="headline flicker text-5xl text-vice-pink neon-text">VICE</p>
+        <p className="headline text-5xl text-vice-cyan neon-cyan">OS</p>
+      </div>
+      <div className="space-y-1">
+        {BOOT_LINES.slice(0, i).map((l, k) => (
+          <p
+            key={k}
+            className={`font-mono text-[10px] leading-relaxed ${
+              l.includes("FOUND") ? "text-vice-blood" : "text-vice-lime/80"
+            }`}
+          >
+            {l}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Lock({
+  wallpaper,
+  onUnlock,
+}: {
+  wallpaper: string | null;
+  onUnlock: () => void;
+}) {
+  const { alias, heat, bountyValue } = useVice();
+  return (
+    <button
+      onClick={onUnlock}
+      className="group relative flex h-full w-full flex-col justify-between p-6 text-left"
+    >
+      {wallpaper && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={wallpaper}
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover opacity-60"
+        />
+      )}
+      <div className="absolute inset-0 bg-gradient-to-b from-black/50 via-transparent to-black/85" />
+
+      <div className="relative mt-10 text-center">
+        <p className="headline text-7xl leading-none">
+          {new Date().toLocaleTimeString("en-US", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          })}
+        </p>
+        <p className="mt-1 font-mono text-[10px] tracking-[0.28em] text-white/60">
+          LEONIDA · 88°F · HUMID
+        </p>
+      </div>
+
+      <div className="relative space-y-3">
+        <div className="glass rounded-2xl p-3">
+          <p className="font-mono text-[9px] tracking-[0.22em] text-vice-cyan">
+            LEONIDA S.O. — ALERT
+          </p>
+          <p className="mt-1 text-[13px] font-semibold">
+            Bounty updated: {money(bountyValue)}
+          </p>
+          <p className="text-[11px] text-white/60">
+            Subject &ldquo;{alias}&rdquo; · heat {heat}°. Tap to dismiss forever.
+          </p>
+        </div>
+        <p className="text-center font-mono text-[10px] tracking-[0.24em] text-white/50 transition group-hover:text-white">
+          TAP TO UNLOCK ↑
+        </p>
+      </div>
+    </button>
+  );
+}
+
+function Home({
+  wallpaper,
+  onOpen,
+  onLock,
+}: {
+  wallpaper: string | null;
+  onOpen: (id: Screen) => void;
+  onLock: () => void;
+}) {
+  const { alias, handle, posts, bountyValue, starCount } = useVice();
+  return (
+    <div className="relative h-full">
+      {wallpaper && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={wallpaper}
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover opacity-35"
+        />
+      )}
+      <div className="absolute inset-0 bg-gradient-to-b from-vice-void/60 via-vice-void/80 to-vice-void" />
+
+      <div className="vice-scroll relative h-full overflow-y-auto p-5">
+        {/* heat widget */}
+        <div className="glass rounded-2xl p-4">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="font-mono text-[9px] tracking-[0.22em] text-white/45">
+                SUBJECT
+              </p>
+              <p className="headline text-xl leading-tight">{alias}</p>
+              <p className="font-mono text-[10px] text-vice-cyan">{handle}</p>
+            </div>
+            <div className="text-right">
+              <p className="font-mono text-[9px] tracking-[0.22em] text-white/45">
+                BOUNTY
+              </p>
+              <p className="headline text-xl text-vice-lime">{money(bountyValue)}</p>
+            </div>
+          </div>
+          <div className="mt-3">
+            <HeatMeter />
+          </div>
+        </div>
+
+        {/* apps */}
+        <div className="mt-5 grid grid-cols-2 gap-3">
+          {APPS.map((a) => (
+            <button
+              key={a.id}
+              onClick={() => onOpen(a.id)}
+              className="group rounded-2xl border border-white/10 bg-black/40 p-3 text-left transition hover:-translate-y-0.5 hover:border-white/30"
+            >
+              <div
+                className="flex h-12 w-12 items-center justify-center rounded-xl text-xl text-vice-void shadow-lg transition group-hover:scale-105"
+                style={{ background: `linear-gradient(135deg, ${a.from}, ${a.to})` }}
+              >
+                {a.glyph}
+              </div>
+              <p className="mt-2.5 text-[12px] font-bold tracking-wide">{a.name}</p>
+              <p className="font-mono text-[9px] tracking-[0.12em] text-white/40">
+                {a.sub}
+              </p>
+            </button>
+          ))}
+        </div>
+
+        {/* recent */}
+        <div className="mt-5">
+          <p className="font-mono text-[9px] tracking-[0.24em] text-white/40">
+            RECENT ACTIVITY
+          </p>
+          {posts.length === 0 ? (
+            <p className="mt-2 text-[12px] leading-snug text-white/50">
+              Nothing on the record yet. Open{" "}
+              <span className="text-vice-pink">VICEGRAM</span>, pick a shot, and see
+              what the image lab does to your reputation.
+            </p>
+          ) : (
+            <div className="mt-2 flex gap-2 overflow-x-auto no-scrollbar">
+              {posts.slice(0, 6).map((p) => (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  key={p.id}
+                  src={p.image}
+                  alt={p.caption}
+                  className="h-16 w-14 shrink-0 rounded-lg border border-white/10 object-cover"
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 flex items-center justify-between">
+          <span className="font-mono text-[9px] tracking-[0.2em] text-white/30">
+            WANTED LEVEL
+          </span>
+          <Stars count={starCount} size={13} />
+        </div>
+
+        <button
+          onClick={onLock}
+          className="mt-4 w-full rounded-xl border border-white/10 py-2 font-mono text-[9px] tracking-[0.24em] text-white/35 transition hover:border-white/30 hover:text-white/70"
+        >
+          LOCK DEVICE
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* toasts                                                              */
+/* ------------------------------------------------------------------ */
+
+function Toasts() {
+  const { toasts } = useVice();
+  const tone = {
+    heat: "border-vice-pink/60 text-vice-pink",
+    alert: "border-vice-blood/70 text-vice-blood",
+    cool: "border-vice-lime/60 text-vice-lime",
+    info: "border-vice-cyan/60 text-vice-cyan",
+  };
+  return (
+    <div className="pointer-events-none absolute inset-x-3 top-3 z-40 space-y-2">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`glass-deep pop-in rounded-2xl border px-3 py-2.5 ${tone[t.kind]}`}
+        >
+          <p className="font-mono text-[11px] font-bold tracking-[0.16em]">{t.title}</p>
+          {t.body && (
+            <p className="mt-0.5 text-[11px] leading-snug text-white/70">{t.body}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* desktop side panels                                                 */
+/* ------------------------------------------------------------------ */
+
+function SidePanelLeft() {
+  return (
+    <aside className="hidden w-[300px] shrink-0 space-y-4 lg:block">
+      <div>
+        <p className="font-mono text-[10px] tracking-[0.3em] text-vice-cyan">
+          BUILT WITH IMAGE EDITOR
+        </p>
+        <h1 className="headline mt-2 text-6xl leading-[0.82]">
+          VICE
+          <br />
+          <span className="text-vice-pink neon-text">OS</span>
+        </h1>
+        <p className="mt-3 text-sm leading-relaxed text-white/60">
+          A phone you&apos;d actually find in Leonida. Shoot a frame, take it into the
+          image lab, and decide how much of the truth survives the edit — the state
+          is watching the same photo you are.
+        </p>
+      </div>
+
+      <Panel label="THE LOOP">
+        <ol className="space-y-2.5 text-[12px] leading-snug text-white/65">
+          <li>
+            <span className="font-mono text-vice-pink">01</span> Pick a shot from the
+            camera roll — every one is painted on a canvas at runtime.
+          </li>
+          <li>
+            <span className="font-mono text-vice-pink">02</span> Edit it in the image
+            lab: crop, grade, draw, sticker over the incriminating parts.
+          </li>
+          <li>
+            <span className="font-mono text-vice-pink">03</span> Forensics diffs your
+            export against the original and scores how identifiable it still is.
+          </li>
+          <li>
+            <span className="font-mono text-vice-pink">04</span> Post it. Heat goes up,
+            bounty goes up, the poster prints itself.
+          </li>
+        </ol>
+      </Panel>
+
+      <Panel label="STATUS">
+        <HeatMeter />
+      </Panel>
+    </aside>
+  );
+}
+
+function SidePanelRight() {
+  const { posts, crimes, followers, bountyValue, alias } = useVice();
+  const [feed, setFeed] = useState<string[]>([]);
+
+  useEffect(() => {
+    const t = setInterval(
+      () => setFeed((f) => [pick(DISPATCH), ...f].slice(0, 5)),
+      5200,
+    );
+    return () => clearInterval(t);
+  }, []);
+
+  const stats = useMemo(
+    () => [
+      { k: "POSTS", v: posts.length.toString() },
+      { k: "FOLLOWERS", v: followers.toLocaleString() },
+      { k: "CHARGES", v: crimes.length.toString() },
+      { k: "BOUNTY", v: money(bountyValue) },
+    ],
+    [posts.length, followers, crimes.length, bountyValue],
+  );
+
+  return (
+    <aside className="hidden w-[300px] shrink-0 space-y-4 xl:block">
+      <Panel label={`FILE ON ${alias}`}>
+        <div className="grid grid-cols-2 gap-3">
+          {stats.map((s) => (
+            <div key={s.k}>
+              <p className="font-mono text-[9px] tracking-[0.2em] text-white/40">
+                {s.k}
+              </p>
+              <p className="headline text-xl">{s.v}</p>
+            </div>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel label="LSO DISPATCH">
+        <div className="space-y-2">
+          {feed.length === 0 && (
+            <p className="font-mono text-[10px] text-white/30">…scanning…</p>
+          )}
+          {feed.map((l, i) => (
+            <p
+              key={`${l}-${i}`}
+              className="rise-in font-mono text-[10px] leading-relaxed text-white/55"
+            >
+              <span className="text-vice-cyan">▸</span> {l}
+            </p>
+          ))}
+        </div>
+      </Panel>
+
+      <Panel label="COLOPHON">
+        <p className="text-[12px] leading-relaxed text-white/60">
+          Editing is powered by{" "}
+          <a
+            href="https://github.com/unlayer/react-image-editor"
+            target="_blank"
+            rel="noreferrer"
+            className="text-vice-pink underline underline-offset-4"
+          >
+            @unlayer/react-image-editor
+          </a>
+          . Everything else — scenes, mugshots, posters, licenses — is drawn with
+          Canvas 2D in your browser. No uploads, no assets, no server.
+        </p>
+      </Panel>
+    </aside>
+  );
+}
