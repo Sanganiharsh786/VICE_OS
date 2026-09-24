@@ -38,6 +38,20 @@ body {
   color: #06010f;
 }
 
+/* ---------- image lab ---------- */
+/*
+ * The editor wrapper renders <div style="flex:1;display:flex;min-height:X">
+ * around its own container, and only `minHeight` reaches that outer div.
+ * A percentage min-height there has nothing definite to resolve against, so
+ * the editor lays out at its full intrinsic height, overflows the stage, and
+ * its internal overflow-y-auto panels never get a bounded box to scroll in.
+ * Pinning the outer div to the stage height fixes the tool panels.
+ */
+.image-lab > div {
+  height: 100%;
+  min-height: 0 !important;
+}
+
 /* ---------- scrollbars ---------- */
 .vice-scroll {
   scrollbar-width: thin;

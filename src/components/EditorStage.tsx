@@ -195,12 +195,14 @@ export default function EditorStage({
       <div className="relative z-10 flex-1 overflow-hidden p-2 sm:p-4">
         <div
           ref={stage}
-          className="relative h-full w-full overflow-hidden rounded-2xl border border-white/10 bg-black/40"
+          className="image-lab relative h-full w-full overflow-hidden rounded-2xl border border-white/10 bg-black/40"
         >
           <ImageEditor
             ref={ref}
             image={image}
-            minHeight="100%"
+            // The stage supplies the height (see .image-lab in globals.css);
+            // a min-height here would only fight it.
+            minHeight={0}
             style={{ height: "100%", width: "100%" }}
             options={EDITOR_OPTIONS}
             onLoad={() => setReady(true)}
