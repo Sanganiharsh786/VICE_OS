@@ -21,9 +21,19 @@ type Screen =
   | "wanted"
   | "id"
   | "scanner"
-  | "contracts";
+  | "contracts"
+  | "street";
 
 const APPS = [
+  {
+    id: "street" as const,
+    name: "LEONIDA LIVE",
+    sub: "walk it · shoot it · 3D",
+    glyph: "▶",
+    from: "#22e6ff",
+    to: "#ff2e97",
+    wide: true,
+  },
   {
     id: "contracts" as const,
     name: "THE FIXER",
@@ -114,6 +124,9 @@ export default function ViceOS() {
             />
           )}
           {screen === "vicegram" && <Vicegram onBack={() => setScreen("home")} />}
+          {screen === "street" && (
+            <Vicegram onBack={() => setScreen("home")} startInStreet />
+          )}
           {screen === "wanted" && <MostWanted onBack={() => setScreen("home")} />}
           {screen === "id" && <LeonidaID onBack={() => setScreen("home")} />}
           {screen === "scanner" && <Scanner onBack={() => setScreen("home")} />}
@@ -434,7 +447,12 @@ function Home({
                   {a.sub}
                 </p>
               </div>
-              {"wide" in a && a.wide && <JobBadge />}
+              {a.id === "contracts" && <JobBadge />}
+              {a.id === "street" && (
+                <span className="shrink-0 rounded-full bg-vice-cyan/20 px-2 py-0.5 font-mono text-[9px] tracking-[0.12em] text-vice-cyan">
+                  3D
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -529,32 +547,37 @@ function SidePanelLeft() {
           <span className="text-vice-pink neon-text">OS</span>
         </h1>
         <p className="mt-3 text-sm leading-relaxed text-white/60">
-          A phone you&apos;d actually find in Leonida. Shoot a frame, take it into the
-          image lab, and decide how much of the truth survives the edit — the state
-          is watching the same photo you are.
+          A phone you&apos;d actually find in Leonida. Walk the block in 3D, raise the
+          phone, take the shot — then decide in the image lab how much of the truth
+          survives the edit. The state is watching the same photo you are.
         </p>
       </div>
 
       <Panel label="THE LOOP">
         <ol className="space-y-2.5 text-[12px] leading-snug text-white/65">
           <li>
-            <span className="font-mono text-vice-pink">01</span> Pick a shot from the
-            camera roll — every one is painted on a canvas at runtime.
+            <span className="font-mono text-vice-cyan">01</span> Open{" "}
+            <span className="text-vice-cyan">LEONIDA LIVE</span> and walk a real-time 3D
+            street — rig, crowd and city all generated at runtime.
           </li>
           <li>
-            <span className="font-mono text-vice-pink">02</span> Edit it in the image
+            <span className="font-mono text-vice-cyan">02</span> Raise the phone and
+            shoot. The lens logs every face, plate and landmark it caught.
+          </li>
+          <li>
+            <span className="font-mono text-vice-pink">03</span> Edit it in the image
             lab: crop, grade, draw, sticker over the incriminating parts.
           </li>
           <li>
-            <span className="font-mono text-vice-pink">03</span> Forensics diffs your
-            export against the original and scores how identifiable it still is.
+            <span className="font-mono text-vice-pink">04</span> Forensics diffs your
+            export against the original and prices what you left in.
           </li>
           <li>
-            <span className="font-mono text-vice-pink">04</span> Post it. Heat goes up,
+            <span className="font-mono text-vice-pink">05</span> Post it. Heat goes up,
             bounty goes up, the poster prints itself.
           </li>
           <li>
-            <span className="font-mono text-vice-sun">05</span> Or take a contract from{" "}
+            <span className="font-mono text-vice-sun">06</span> Or take a contract from{" "}
             <span className="text-vice-sun">THE FIXER</span> — a timed job graded
             purely on what the forensic scan finds in your export.
           </li>
@@ -635,8 +658,9 @@ function SidePanelRight() {
           >
             @unlayer/react-image-editor
           </a>
-          . Everything else — scenes, mugshots, posters, licenses — is drawn with
-          Canvas 2D in your browser. No uploads, no assets, no server.
+          . Leonida Live runs on three.js. Everything else — the scenes, mugshots,
+          posters, licenses, the humanoid rig and the whole city — is generated at
+          runtime. No downloaded models, no uploads, no server.
         </p>
       </Panel>
     </aside>

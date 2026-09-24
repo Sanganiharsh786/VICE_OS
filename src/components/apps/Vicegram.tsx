@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import { analyzeEdit, type Forensics } from "@/lib/art";
 import {
@@ -18,6 +19,17 @@ import { uid, useVice, type Comment, type Post } from "@/lib/store";
 import { readFile, useCameraRoll } from "@/lib/useCameraRoll";
 import EditorStage from "@/components/EditorStage";
 import { AppHeader, Btn, Chip, Stars, Tally } from "@/components/ui";
+import type { StreetPhoto } from "@/components/apps/StreetMode";
+
+/**
+ * The 3D street is the heaviest thing in the app by an order of magnitude, so
+ * it is only fetched when the player actually opens the camera.
+ */
+const StreetMode = dynamic(() => import("@/components/apps/StreetMode"), {
+  ssr: false,
+});
+
+export type Evidence = { kind: string; label: string };
 
 type Frame = {
   src: string;
@@ -25,10 +37,16 @@ type Frame = {
   location: string;
   /** Which camera-roll scene this came from — contracts can ask for one. */
   sceneId?: string;
+  /**
+   * Identifiable subjects the lens caught, when the frame was shot in Leonida
+   * Live. These are what the edit has to deal with.
+   */
+  evidence?: Evidence[];
 };
 
 type Mode =
   | { k: "roll" }
+  | { k: "street" }
   | ({ k: "edit" } & Frame)
   | ({ k: "scan"; original: string } & Frame)
   | ({ k: "compose"; original: string; forensics: Forensics } & Frame)
@@ -42,28 +60,73 @@ function scrubScore(f: Forensics) {
   );
 }
 
+/** What each kind of identifiable subject is worth if you leave it in. */
+const EVIDENCE_HEAT: Record<string, number> = {
+  FACE: 9,
+  PLATE: 6,
+  LANDMARK: 5,
+  CONTRABAND: 12,
+};
+
+/**
+ * Heat from what the lens caught. Unlike tags — which you choose — this is
+ * decided by where you were standing when you pressed the shutter, and the
+ * only way to walk it back is to cover it in the Image Lab.
+ */
+export function evidenceHeat(evidence: Evidence[] | undefined, scrub: number) {
+  if (!evidence?.length) return 0;
+  const raw = evidence.reduce((a, e) => a + (EVIDENCE_HEAT[e.kind] ?? 4), 0);
+  return raw * Math.max(0, 1 - scrub / 85);
+}
+
 /**
  * Heat a post will cost you. Lives here so the composer's projection and the
  * number you actually take are always the same formula.
  */
-function projectHeat(scrub: number, tags: string[]) {
+function projectHeat(scrub: number, tags: string[], evidence?: Evidence[]) {
   const exposure =
     TAGS.filter((t) => tags.includes(t.label)).reduce((a, t) => a + t.heat, 0) + 6;
   return Math.max(
     -6,
-    Math.round(exposure * (1 - scrub / 130) + (scrub < 8 ? 5 : -3)),
+    Math.round(
+      exposure * (1 - scrub / 130) +
+        evidenceHeat(evidence, scrub) +
+        (scrub < 8 ? 5 : -3),
+    ),
   );
 }
 
-export default function Vicegram({ onBack }: { onBack: () => void }) {
+export default function Vicegram({
+  onBack,
+  startInStreet = false,
+}: {
+  onBack: () => void;
+  startInStreet?: boolean;
+}) {
   const vice = useVice();
   const shots = useCameraRoll();
-  const [mode, setMode] = useState<Mode>({ k: "roll" });
+  const [mode, setMode] = useState<Mode>(
+    startInStreet ? { k: "street" } : { k: "roll" },
+  );
   const [caption, setCaption] = useState("");
   const [tags, setTags] = useState<string[]>(["#leonidalive"]);
+  /** Frames shot in Leonida Live this session. They lead the roll. */
+  const [captured, setCaptured] = useState<Frame[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const hasPosts = vice.posts.length > 0;
+
+  /* ---- the shutter hands straight over to the image lab ---- */
+  const onShoot = (photo: StreetPhoto) => {
+    const frame: Frame = {
+      src: photo.src,
+      title: photo.title,
+      location: photo.location,
+      evidence: photo.evidence,
+    };
+    setCaptured((c) => [frame, ...c].slice(0, 12));
+    setMode({ k: "edit", ...frame });
+  };
 
   /* ---- editor commit -> forensic scan ---- */
   const onCommit = async (dataUrl: string) => {
@@ -75,6 +138,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
       title: mode.title,
       location: mode.location,
       sceneId: mode.sceneId,
+      evidence: mode.evidence,
     });
     let forensics: Forensics;
     try {
@@ -98,6 +162,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
         title: mode.title,
         location: mode.location,
         sceneId: mode.sceneId,
+        evidence: mode.evidence,
         forensics,
       });
     }, 1900);
@@ -110,7 +175,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
     const chosen = TAGS.filter((t) => tags.includes(t.label));
     const reach = chosen.reduce((a, t) => a + t.reach, 0) + caption.length / 3;
 
-    const heatDelta = projectHeat(scrub, tags);
+    const heatDelta = projectHeat(scrub, tags, mode.evidence);
     const likes = Math.round(
       (180 + reach * 26) * (0.7 + f.altered / 90) * (1 + Math.random() * 0.4),
     );
@@ -223,20 +288,41 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode.k, hasPosts, vice.posts[0]?.id, vice.posts[0]?.likes]);
 
+  /* ---------------- leonida live ---------------- */
+  if (mode.k === "street") {
+    return (
+      <StreetMode
+        heat={vice.heat}
+        onExit={() => setMode({ k: "roll" })}
+        onShoot={onShoot}
+      />
+    );
+  }
+
   /* ---------------- editor overlay ---------------- */
   if (mode.k === "edit") {
+    const caught = mode.evidence ?? [];
     return (
       <EditorStage
         image={mode.src}
         mission={{
           title: mode.title,
-          brief:
-            "Make it yours — then decide how much of the truth stays in frame.",
-          hints: [
-            "Filters + grade = style points",
-            "Stickers & shapes cover faces, plates, landmarks",
-            "Crop out anything that geolocates you",
-          ],
+          brief: caught.length
+            ? `The lens caught ${caught.length} identifiable ${
+                caught.length === 1 ? "subject" : "subjects"
+              }: ${caught.map((e) => e.label).join(", ")}. Whatever you leave in stays in.`
+            : "Make it yours — then decide how much of the truth stays in frame.",
+          hints: caught.length
+            ? [
+                "Stickers & shapes go over faces and plates",
+                "Crop tight to lose the skyline that geotags you",
+                "Grade hard — forensics scores the whole surface",
+              ]
+            : [
+                "Filters + grade = style points",
+                "Stickers & shapes cover faces, plates, landmarks",
+                "Crop out anything that geolocates you",
+              ],
           accent: "pink",
           commitLabel: "RUN FORENSICS",
         }}
@@ -275,6 +361,59 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
                 </Btn>
               )}
             </div>
+
+            {/* the 3D camera — this is where new frames come from */}
+            <button
+              onClick={() => setMode({ k: "street" })}
+              className="group relative mb-4 w-full overflow-hidden rounded-2xl border border-vice-cyan/40 bg-gradient-to-br from-vice-plum to-black p-4 text-left transition hover:border-vice-cyan hover:shadow-[0_0_40px_-10px_rgba(34,230,255,0.8)]"
+            >
+              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_80%_20%,rgba(255,46,151,0.28),transparent_60%)]" />
+              <div className="relative flex items-center gap-3">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-vice-cyan to-vice-pink text-xl text-vice-void">
+                  ▶
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-bold tracking-wide">
+                    SHOOT IN LEONIDA LIVE
+                  </p>
+                  <p className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-vice-cyan/80">
+                    WALK THE BLOCK IN 3D · FRAME IT · THE SHUTTER OPENS THE LAB
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full bg-vice-cyan/15 px-2 py-0.5 font-mono text-[8px] tracking-[0.14em] text-vice-cyan">
+                  3D
+                </span>
+              </div>
+            </button>
+
+            {captured.length > 0 && (
+              <div className="mb-4">
+                <p className="font-mono text-[9px] tracking-[0.24em] text-white/40">
+                  SHOT IN LEONIDA · {captured.length}
+                </p>
+                <div className="mt-2 flex gap-2 overflow-x-auto no-scrollbar">
+                  {captured.map((f, i) => (
+                    <button
+                      key={`${f.title}-${i}`}
+                      onClick={() => setMode({ k: "edit", ...f })}
+                      className="relative h-24 w-20 shrink-0 overflow-hidden rounded-lg border border-vice-cyan/40 transition hover:border-vice-cyan"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={f.src}
+                        alt={f.title}
+                        className="h-full w-full object-cover"
+                      />
+                      {!!f.evidence?.length && (
+                        <span className="absolute right-1 top-1 rounded bg-vice-blood px-1 font-mono text-[8px] font-bold text-vice-void">
+                          {f.evidence.length}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3">
               {shots.map((s) => (
@@ -367,6 +506,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
             setTags={setTags}
             onPublish={publish}
             sceneId={mode.sceneId}
+            evidence={mode.evidence}
             onBackToEdit={() =>
               setMode({
                 k: "edit",
@@ -374,6 +514,7 @@ export default function Vicegram({ onBack }: { onBack: () => void }) {
                 title: mode.title,
                 location: mode.location,
                 sceneId: mode.sceneId,
+                evidence: mode.evidence,
               })
             }
           />
@@ -453,6 +594,7 @@ function Composer({
   tags,
   setTags,
   sceneId,
+  evidence,
   onPublish,
   onBackToEdit,
 }: {
@@ -463,6 +605,7 @@ function Composer({
   tags: string[];
   setTags: (v: string[]) => void;
   sceneId?: string;
+  evidence?: Evidence[];
   onPublish: () => void;
   onBackToEdit: () => void;
 }) {
@@ -474,7 +617,8 @@ function Composer({
         ? { t: "PARTIALLY SCRUBBED", c: "#22e6ff", s: "Recognisable, but you covered the worst of it." }
         : { t: "RAW FRAME", c: "#ff3b30", s: "Everything in this shot is admissible. Your call." };
 
-  const projected = projectHeat(scrub, tags);
+  const projected = projectHeat(scrub, tags, evidence);
+  const exposed = Math.round(evidenceHeat(evidence, scrub));
 
   return (
     <div className="p-4 pb-6 rise-in">
@@ -512,6 +656,52 @@ function Composer({
         <p className="mt-2 font-mono text-[9px] tracking-[0.16em] text-vice-lime">
           ✓ REFRAMED — ORIGINAL COMPOSITION NO LONGER MATCHES
         </p>
+      )}
+
+      {/*
+        Only frames shot in Leonida Live carry this — the engine knows exactly
+        what was visible and unoccluded when the shutter fired, so the editor
+        session has a concrete target instead of a vibe.
+      */}
+      {!!evidence?.length && (
+        <div
+          className="mt-4 rounded-xl border p-3"
+          style={{
+            borderColor: exposed > 4 ? "#ff3b3055" : "#9dff3d55",
+            background: exposed > 4 ? "#ff3b300d" : "#9dff3d0d",
+          }}
+        >
+          <div className="flex items-baseline justify-between">
+            <p className="font-mono text-[9px] tracking-[0.22em] text-white/50">
+              CAUGHT BY THE LENS
+            </p>
+            <p
+              className="font-mono text-[11px] tabular-nums"
+              style={{ color: exposed > 4 ? "#ff3b30" : "#9dff3d" }}
+            >
+              {exposed > 0 ? `+${exposed} HEAT` : "NEUTRALISED"}
+            </p>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {evidence.map((e) => (
+              <span
+                key={e.label}
+                className={`rounded-md border px-1.5 py-0.5 font-mono text-[9px] tracking-[0.1em] ${
+                  exposed > 4
+                    ? "border-vice-blood/50 text-vice-blood"
+                    : "border-vice-lime/50 text-vice-lime line-through"
+                }`}
+              >
+                {e.label}
+              </span>
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] leading-snug text-white/55">
+            {exposed > 4
+              ? "Still identifiable. Go back to the lab and cover it — scrub rating discounts every one of these."
+              : "Scrubbed past the point of identification. Nothing here to match."}
+          </p>
+        </div>
       )}
 
       <div className="mt-5">
