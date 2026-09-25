@@ -385,6 +385,11 @@ Every push to `main` publishes to GitHub Pages
 [`next.config.ts`](next.config.ts) to a static export (`output: "export"`) under that prefix.
 A plain `npm run build` with no such variable stays an ordinary server build.
 
+Forking this? Pages has to be switched on once, by hand, under
+**Settings → Pages → Build and deployment → Source: "GitHub Actions"**. The workflow can't do
+it for you: `GITHUB_TOKEN` is not allowed to create a Pages site that has never existed, and
+`configure-pages` fails with *"Get Pages site failed / Not Found"* until someone flips it.
+
 There is nothing to deploy *to* — one route, no API, no database. Everything the player makes
 lives in their own browser.
 

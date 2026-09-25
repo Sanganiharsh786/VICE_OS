@@ -27,13 +27,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Runs before the build, not after it: if Pages isn't set up this is the
-      # step that says so, and there's no reason to spend a build finding out.
-      # `enablement` turns Pages on for the repository the first time through,
-      # so a fresh clone deploys without anyone opening Settings by hand.
+      # Requires Pages to be on for the repository, one time, by hand:
+      #   Settings → Pages → Build and deployment → Source: "GitHub Actions"
+      #
+      # `enablement: true` is not an alternative. GITHUB_TOKEN cannot create a
+      # Pages site that has never existed — it comes back "Resource not
+      # accessible by integration" no matter what `permissions:` declares — so
+      # the flag only replaces a clear error with a confusing one.
+      #
+      # Runs before the build because it is the step that discovers Pages isn't
+      # set up, and there is no reason to spend a build finding that out.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/setup-node@v4
         with:
