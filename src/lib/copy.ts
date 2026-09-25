@@ -140,6 +140,32 @@ export const BOOT_LINES = [
   "welcome back.",
 ];
 
+/**
+ * The radio line a freshly published photo generates. Reads back what the
+ * forensic scan actually found, so the dispatch is a consequence of the edit
+ * rather than set dressing.
+ */
+export function dispatchFor(location: string, confidence: number) {
+  const where = location.toLowerCase();
+  if (confidence >= 70)
+    return pick([
+      `All units — clear photographic evidence out of ${where}. Subject is identifiable.`,
+      `We have a face and a location. ${location}. Somebody go look.`,
+      `That post is admissible. Repeat, admissible. ${location}.`,
+    ]);
+  if (confidence >= 35)
+    return pick([
+      `Partial match on a photo from ${where}. Enhance and re-run it.`,
+      `Units responding to ${where}. Possible photo evidence detected.`,
+      `Got something out of ${where}. Half a subject. Working on it.`,
+    ]);
+  return pick([
+    `New post out of ${where}. Nothing in it we can use.`,
+    `Facial rec came back empty on the ${where} frame. Again.`,
+    `Whoever's editing these knows exactly what they're doing.`,
+  ]);
+}
+
 export function pick<T>(arr: T[], rnd = Math.random): T {
   return arr[Math.floor(rnd() * arr.length)];
 }

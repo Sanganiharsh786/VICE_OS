@@ -24,6 +24,7 @@ import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { createCharacter, paletteFor } from "./rig";
 import { Actor, type ActorInput } from "./locomotion";
 import { buildCity, resolveCollisions, type City, type EvidenceTag } from "./city";
+import type { Evidence } from "../evidence";
 
 export type Quality = "high" | "low";
 
@@ -32,13 +33,13 @@ export type Stats = {
   heading: string;
   aiming: boolean;
   /** Tagged subjects currently framed — drives the live viewfinder readout. */
-  inFrame: { kind: string; label: string }[];
+  inFrame: Evidence[];
   fps: number;
 };
 
 export type CaptureResult = {
   dataUrl: string;
-  evidence: { kind: string; label: string }[];
+  evidence: Evidence[];
   title: string;
   location: string;
 };
@@ -457,7 +458,7 @@ export class StreetEngine {
 
       // At high heat, anyone who gets close breaks away from you.
       const toPlayer = Math.hypot(p.x - a.pos.x, p.z - a.pos.z);
-      const spooked = this.heat > 45 && toPlayer < 9;
+      const spooked = this.heat > 40 && toPlayer < 7 + (this.heat - 40) * 0.12;
       ped.scared = spooked
         ? Math.min(1, ped.scared + dt * 2)
         : Math.max(0, ped.scared - dt * 0.8);
@@ -478,8 +479,15 @@ export class StreetEngine {
         run: ped.scared > 0.5,
         jump: false,
         aim: 0,
-        // spooked pedestrians keep an eye on you — it reads as guilt
-        look: ped.scared > 0.2 || toPlayer < 7 ? p : null,
+        /*
+         * How the city reads you, straight off the heat bar. Below 20 nobody
+         * cares; from 20 heads start turning at a distance that grows with
+         * your heat; past 40 they break away entirely (see `spooked`).
+         */
+        look:
+          ped.scared > 0.2 || toPlayer < 7 + Math.max(0, this.heat - 20) * 0.18
+            ? p
+            : null,
       });
       resolveCollisions(a.pos, 0.32, this.city.colliders);
     }
@@ -627,11 +635,14 @@ export class StreetEngine {
    * Which tagged subjects the given camera can actually see. Frustum test
    * first, then a ray to confirm nothing is standing in the way.
    */
-  private framed(cam: THREE.PerspectiveCamera, edge = 1) {
-    const out: { kind: string; label: string }[] = [];
+  private framed(cam: THREE.PerspectiveCamera, edge = 1): Evidence[] {
+    const out: Evidence[] = [];
     const p = new THREE.Vector3();
     const dir = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    const up = new THREE.Vector3();
     cam.updateMatrixWorld();
+    cam.matrixWorld.extractBasis(right, up, new THREE.Vector3());
 
     for (const tag of this.evidence) {
       tag.object.getWorldPosition(p).add(tag.offset);
@@ -651,7 +662,40 @@ export class StreetEngine {
         const blocked = this.raycaster.intersectObject(this.city.group, true);
         if (blocked.length) continue;
       }
-      out.push({ kind: tag.kind, label: tag.label });
+
+      /*
+       * Screen-space footprint of the detail, measured by projecting a point
+       * one radius to the camera's right and one radius up. This is the
+       * rectangle the forensic pass will re-read in the exported image, so it
+       * has to be the subject and not much else — a little padding only.
+       */
+      const PAD = 1.55;
+      const ex = p
+        .clone()
+        .addScaledVector(right, tag.radius * PAD)
+        .project(cam);
+      const ey = p
+        .clone()
+        .addScaledVector(up, tag.radius * PAD)
+        .project(cam);
+      const hw = Math.min(0.5, Math.max(0.02, Math.abs(ex.x - ndc.x)));
+      const hh = Math.min(0.5, Math.max(0.02, Math.abs(ey.y - ndc.y)));
+
+      const cx = (ndc.x + 1) / 2;
+      const cy = (1 - ndc.y) / 2;
+      const x0 = Math.max(0, cx - hw);
+      const y0 = Math.max(0, cy - hh);
+
+      out.push({
+        kind: tag.kind,
+        label: tag.label,
+        box: {
+          x: x0,
+          y: y0,
+          w: Math.min(1 - x0, hw * 2),
+          h: Math.min(1 - y0, hh * 2),
+        },
+      });
     }
     return out;
   }

@@ -13,17 +13,33 @@ import { SCENES, type SceneId } from "./art";
 
 export type ContractEvent = "post" | "poster";
 
+/** One subject's outcome, as read back by the forensic pass. */
+export type Finding = {
+  kind: string;
+  label: string;
+  status: "VISIBLE" | "PARTIAL" | "HIDDEN" | "REMOVED";
+  concealment: number;
+};
+
 /** Everything an objective is allowed to look at. */
 export type ContractCtx = {
   event: ContractEvent;
   forensics?: Forensics;
-  /** 0-100 composite of altered/coverage/reframe — see Vicegram. */
+  /** 0-100 composite of altered/coverage/reframe — see lib/forensics. */
   scrub?: number;
   tags?: string[];
   sceneId?: string;
   heatDelta?: number;
   bounty?: number;
+  /**
+   * Per-subject verdicts. Only frames shot in Leonida Live carry these, which
+   * is why every objective built on them says so in its `tool` line.
+   */
+  findings?: Finding[];
 };
+
+const gone = (f: Finding) => f.status === "HIDDEN" || f.status === "REMOVED";
+const readable = (f: Finding) => f.status === "VISIBLE";
 
 export type Objective = {
   label: string;
@@ -36,6 +52,18 @@ export type Objective = {
 
 export type Tier = "LOW" | "MID" | "HIGH";
 
+/**
+ * Two kinds of job, and the whole point is that they pull in opposite
+ * directions. CLEANUP pays you to make the photo unusable; EVIDENCE pays you
+ * to make it damning — and takes the heat that comes with it.
+ */
+export type Category = "CLEANUP" | "EVIDENCE";
+
+export const CATEGORY_NOTE: Record<Category, string> = {
+  CLEANUP: "HIDE WHAT THE LENS CAUGHT",
+  EVIDENCE: "KEEP IT READABLE",
+};
+
 export type Contract = {
   id: string;
   codename: string;
@@ -43,6 +71,7 @@ export type Contract = {
   handle: string;
   hue: number;
   brief: string;
+  category: Category;
   event: ContractEvent;
   objectives: Objective[];
   seconds: number;
@@ -166,6 +195,39 @@ const obj = {
     tool: "camera roll",
     test: (c) => c.sceneId === id,
   }),
+  /* ---- evidence objectives (Leonida Live frames only) ---- */
+  subjects: (n: number): Objective => ({
+    label: `Catch ${n}+ identifiable ${n === 1 ? "subject" : "subjects"} in frame`,
+    tool: "LEONIDA LIVE → get close before the shutter",
+    test: (c) => (c.findings?.length ?? 0) >= n,
+    progress: (c) => pct(c.findings?.length ?? 0, n),
+  }),
+  hideAll: (): Objective => ({
+    label: "Leave nothing identifiable in the export",
+    tool: "cover every bracket in the Image Lab",
+    test: (c) => Boolean(c.findings?.length) && c.findings!.every(gone),
+    progress: (c) =>
+      c.findings?.length
+        ? c.findings.filter(gone).length / c.findings.length
+        : 0,
+  }),
+  hideKind: (kind: string): Objective => ({
+    label: `Hide every ${kind.toLowerCase()} in the frame`,
+    tool: `sticker or shape over each ${kind.toLowerCase()}`,
+    test: (c) => {
+      const of = c.findings?.filter((f) => f.kind === kind) ?? [];
+      return of.length > 0 && of.every(gone);
+    },
+    progress: (c) => {
+      const of = c.findings?.filter((f) => f.kind === kind) ?? [];
+      return of.length ? of.filter(gone).length / of.length : 0;
+    },
+  }),
+  keepKind: (kind: string): Objective => ({
+    label: `Keep a ${kind.toLowerCase()} clearly readable`,
+    tool: `shoot a ${kind.toLowerCase()} and do NOT cover it`,
+    test: (c) => Boolean(c.findings?.some((f) => f.kind === kind && readable(f))),
+  }),
   bounty: (n: number): Objective => ({
     label: `Print a bulletin worth $${n.toLocaleString()} or more`,
     tool: "MOST WANTED → send to press",
@@ -187,12 +249,14 @@ type Template = (
 ) => Omit<Contract, "id" | "fixer" | "handle" | "hue">;
 
 const TEMPLATES: Template[] = [
+  /* ---------------- CLEANUP — make it unusable ---------------- */
   (r) => {
     const n = 55 + Math.floor(r() * 15);
     return {
       codename: "THE CLEANER",
       brief:
         "I don't care what it looks like when you're done. I care that nobody can match it to the frame it came from.",
+      category: "CLEANUP",
       event: "post",
       objectives: [obj.scrubOver(n)],
       seconds: 150,
@@ -203,21 +267,36 @@ const TEMPLATES: Template[] = [
     };
   },
   (r) => ({
-    codename: "PROOF OF LIFE",
+    codename: "NO FACES",
     brief:
-      "Buyer wants to believe you were standing there. Touch it up if you must, but the place has to still read.",
+      "Go out, shoot somebody, and bring me back a photo where they aren't anybody. Every face covered. I'll know if you missed one.",
+    category: "CLEANUP",
     event: "post",
-    objectives: [obj.scrubUnder(18 + Math.floor(r() * 6)), obj.tag("#leonidalive")],
-    seconds: 120,
-    reward: 12000 + Math.floor(r() * 4000),
-    heatOnSuccess: 11,
-    heatOnFail: 2,
+    objectives: [obj.subjects(1), obj.hideKind("FACE")],
+    seconds: 210,
+    reward: 14000 + Math.floor(r() * 4000),
+    heatOnSuccess: -8,
+    heatOnFail: 6,
     tier: "MID",
+  }),
+  (r) => ({
+    codename: "THE GHOST FRAME",
+    brief:
+      "Everything the lens caught, gone. Faces, plates, the tower, all of it. One bracket left readable and we never spoke.",
+    category: "CLEANUP",
+    event: "post",
+    objectives: [obj.subjects(2), obj.hideAll()],
+    seconds: 240,
+    reward: 24000 + Math.floor(r() * 6000),
+    heatOnSuccess: -12,
+    heatOnFail: 9,
+    tier: "HIGH",
   }),
   (r) => ({
     codename: "THE REBRAND",
     brief:
       "Same photo, different night. Push the colour until the timestamp is a lie.",
+    category: "CLEANUP",
     event: "post",
     objectives: [obj.grade(22 + Math.floor(r() * 10)), obj.altered(45)],
     seconds: 165,
@@ -230,6 +309,7 @@ const TEMPLATES: Template[] = [
     codename: "WITNESS PROTECTION",
     brief:
       "There are three faces in that shot and two of them are mine. Put something over them. Anything.",
+    category: "CLEANUP",
     event: "post",
     objectives: [obj.coverage(16 + Math.floor(r() * 8)), obj.scrubOver(40)],
     seconds: 150,
@@ -242,6 +322,7 @@ const TEMPLATES: Template[] = [
     codename: "PAPER TRAIL",
     brief:
       "The landmark in the corner puts me on a map. Cut it out of the frame, then cover whatever's left.",
+    category: "CLEANUP",
     event: "post",
     objectives: [obj.reframe(), obj.coverage(8)],
     seconds: 135,
@@ -254,6 +335,7 @@ const TEMPLATES: Template[] = [
     codename: "GHOST POST",
     brief:
       "Publish it and move the needle zero degrees. If heat goes up by even one, you never worked for me.",
+    category: "CLEANUP",
     event: "post",
     objectives: [obj.heatUnder(0)],
     seconds: 180,
@@ -262,10 +344,52 @@ const TEMPLATES: Template[] = [
     heatOnFail: 8,
     tier: "HIGH",
   }),
+
+  /* ---------------- EVIDENCE — make it damning ---------------- */
+  (r) => ({
+    codename: "THE WITNESS",
+    brief:
+      "I need a face on the record. Their face. Frame them, publish it, and don't you dare touch it with a sticker. Yes, it'll cost you.",
+    category: "EVIDENCE",
+    event: "post",
+    objectives: [obj.keepKind("FACE"), obj.scrubUnder(30)],
+    seconds: 210,
+    reward: 25000 + Math.floor(r() * 7000),
+    heatOnSuccess: 18,
+    heatOnFail: 4,
+    tier: "HIGH",
+  }),
+  (r) => ({
+    codename: "PLATE READER",
+    brief:
+      "Somebody's car was somewhere it shouldn't have been. Get me the plate, readable, in a post with a location on it.",
+    category: "EVIDENCE",
+    event: "post",
+    objectives: [obj.keepKind("PLATE"), obj.tag("#whowasdriving")],
+    seconds: 200,
+    reward: 21000 + Math.floor(r() * 5000),
+    heatOnSuccess: 13,
+    heatOnFail: 3,
+    tier: "HIGH",
+  }),
+  (r) => ({
+    codename: "PROOF OF LIFE",
+    brief:
+      "Buyer wants to believe you were standing there. Touch it up if you must, but the place has to still read.",
+    category: "EVIDENCE",
+    event: "post",
+    objectives: [obj.scrubUnder(18 + Math.floor(r() * 6)), obj.tag("#leonidalive")],
+    seconds: 120,
+    reward: 12000 + Math.floor(r() * 4000),
+    heatOnSuccess: 11,
+    heatOnFail: 2,
+    tier: "MID",
+  }),
   (r) => ({
     codename: "MAKE SOME NOISE",
     brief:
       "I need the whole state looking the other way for about an hour. Give them something to look at.",
+    category: "EVIDENCE",
     event: "post",
     objectives: [obj.heatOver(16 + Math.floor(r() * 6)), obj.tagCount(3)],
     seconds: 140,
@@ -279,6 +403,7 @@ const TEMPLATES: Template[] = [
     return {
       codename: "LOCATION SCOUT",
       brief: `Client's picky. They want ${scene.title} and they want it to look expensive.`,
+      category: "EVIDENCE",
       event: "post",
       objectives: [obj.scene(scene.id), obj.altered(35)],
       seconds: 160,
@@ -292,6 +417,7 @@ const TEMPLATES: Template[] = [
     codename: "VANITY PRESS",
     brief:
       "My guy collects bulletins. Paint yourself a face, run it through the press, and make the number big.",
+    category: "EVIDENCE",
     event: "poster",
     // Always a stretch on the current bounty, so the job is only winnable
     // by heating yourself up first — never impossible, never free.
@@ -320,17 +446,31 @@ export function rollContract(env: BoardEnv, seedIndex = 0): Contract {
   };
 }
 
-/** Three distinct offers. */
+/**
+ * Three distinct offers, always including at least one of each category —
+ * the choice between burying a photo and publishing it is the decision the
+ * board exists to put in front of the player, so it can never roll away.
+ */
 export function rollBoard(env: BoardEnv): Contract[] {
   const seen = new Set<string>();
   const out: Contract[] = [];
-  for (let i = 0; out.length < 3 && i < 40; i++) {
-    const c = rollContract(env, i);
-    if (seen.has(c.codename)) continue;
-    seen.add(c.codename);
-    out.push(c);
-  }
-  return out;
+
+  const take = (want?: Category) => {
+    for (let i = 0; i < 60; i++) {
+      const c = rollContract(env, i);
+      if (seen.has(c.codename)) continue;
+      if (want && c.category !== want) continue;
+      seen.add(c.codename);
+      out.push(c);
+      return;
+    }
+  };
+
+  take("CLEANUP");
+  take("EVIDENCE");
+  take();
+  // Shuffle so the categories aren't always in the same slots.
+  return out.sort(() => Math.random() - 0.5);
 }
 
 export function evaluate(contract: Contract, ctx: ContractCtx) {

@@ -141,6 +141,50 @@ export default function MostWanted({ onBack }: { onBack: () => void }) {
               </div>
             </div>
 
+            {/*
+              Photos the player published that the forensic scan could still
+              match. This is the continuity beat: the frame they edited in the
+              Image Lab is now the state's evidence against them.
+            */}
+            {vice.records.length > 0 && (
+              <div className="mt-5">
+                <div className="flex items-baseline justify-between">
+                  <p className="font-mono text-[10px] tracking-[0.24em] text-vice-blood">
+                    EVIDENCE ON FILE
+                  </p>
+                  <p className="font-mono text-[9px] tracking-[0.16em] text-white/35">
+                    FROM YOUR POSTS
+                  </p>
+                </div>
+                <div className="mt-2 flex gap-2 overflow-x-auto no-scrollbar pb-1">
+                  {vice.records.map((r) => (
+                    <button
+                      key={r.id}
+                      onClick={() => setMode({ k: "edit", src: r.image })}
+                      className="group relative h-28 w-24 shrink-0 overflow-hidden rounded-lg border border-vice-blood/50 transition hover:border-vice-blood hover:shadow-[0_0_24px_-6px_rgba(255,59,48,0.9)]"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={r.image}
+                        alt={r.location}
+                        className="h-full w-full object-cover"
+                      />
+                      <span className="absolute inset-x-0 bottom-0 bg-black/80 py-0.5 text-center font-mono text-[8px] tracking-[0.12em] text-vice-blood">
+                        {r.confidence}% MATCH
+                      </span>
+                      <span className="absolute inset-x-0 top-0 truncate bg-black/70 px-1 py-0.5 font-mono text-[7px] tracking-[0.1em] text-white/60">
+                        {r.location}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1.5 font-mono text-[9px] leading-relaxed tracking-[0.12em] text-white/30">
+                  THE STATE KEPT WHAT YOUR EDIT LEFT BEHIND. USE ONE AS THE
+                  BULLETIN PHOTO.
+                </p>
+              </div>
+            )}
+
             <p className="mt-5 font-mono text-[10px] tracking-[0.24em] text-white/45">
               SELECT A BOOKING PLATE
             </p>

@@ -2,7 +2,6 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
-import { analyzeEdit, type Forensics } from "@/lib/art";
 import {
   COMMENTERS,
   COMMENTS_HOT,
@@ -11,13 +10,31 @@ import {
   CAPTION_SEEDS,
   CRIMES,
   TAGS,
+  dispatchFor,
   money,
   pick,
 } from "@/lib/copy";
 import { evaluate, TIER_TINT, type ContractCtx } from "@/lib/contracts";
-import { uid, useVice, type Comment, type Post } from "@/lib/store";
+import { rawExposure, type Evidence } from "@/lib/evidence";
+import {
+  heatFor,
+  runForensics,
+  type HeatBreakdown,
+  type Report,
+} from "@/lib/forensics";
+import {
+  uid,
+  useVice,
+  type Attempt,
+  type Comment,
+  type Post,
+} from "@/lib/store";
 import { readFile, useCameraRoll } from "@/lib/useCameraRoll";
 import EditorStage from "@/components/EditorStage";
+import ForensicVision from "@/components/forensic/ForensicVision";
+import ForensicReport from "@/components/forensic/ForensicReport";
+import Consequences, { type Consequence } from "@/components/forensic/Consequences";
+import type { TimelineStep } from "@/components/forensic/useLiveForensics";
 import { AppHeader, Btn, Chip, Stars, Tally } from "@/components/ui";
 import type { StreetPhoto } from "@/components/apps/StreetMode";
 
@@ -29,7 +46,7 @@ const StreetMode = dynamic(() => import("@/components/apps/StreetMode"), {
   ssr: false,
 });
 
-export type Evidence = { kind: string; label: string };
+export type { Evidence };
 
 type Frame = {
   src: string;
@@ -39,62 +56,31 @@ type Frame = {
   sceneId?: string;
   /**
    * Identifiable subjects the lens caught, when the frame was shot in Leonida
-   * Live. These are what the edit has to deal with.
+   * Live, each with the rectangle it occupied. These are what the edit has to
+   * deal with.
    */
-  evidence?: Evidence[];
+  evidence: Evidence[];
+};
+
+type Scanned = Frame & {
+  original: string;
+  report: Report;
+  /** Edit history observed by the live panel on the way to this export. */
+  timeline: TimelineStep[];
+  /** What the last scan of this same frame came out at, if there was one. */
+  previous?: Attempt;
 };
 
 type Mode =
   | { k: "roll" }
   | { k: "street" }
+  | ({ k: "vision" } & Frame)
   | ({ k: "edit" } & Frame)
   | ({ k: "scan"; original: string } & Frame)
-  | ({ k: "compose"; original: string; forensics: Forensics } & Frame)
+  | ({ k: "report" } & Scanned)
+  | ({ k: "compose" } & Scanned)
+  | { k: "aftermath"; steps: Consequence[] }
   | { k: "feed" };
-
-/** How hard did the player scrub the frame? 0 = raw upload, 100 = unrecognisable. */
-function scrubScore(f: Forensics) {
-  return Math.max(
-    0,
-    Math.min(100, f.altered * 0.55 + f.coverage * 0.9 + (f.reframed ? 15 : 0)),
-  );
-}
-
-/** What each kind of identifiable subject is worth if you leave it in. */
-const EVIDENCE_HEAT: Record<string, number> = {
-  FACE: 9,
-  PLATE: 6,
-  LANDMARK: 5,
-  CONTRABAND: 12,
-};
-
-/**
- * Heat from what the lens caught. Unlike tags — which you choose — this is
- * decided by where you were standing when you pressed the shutter, and the
- * only way to walk it back is to cover it in the Image Lab.
- */
-export function evidenceHeat(evidence: Evidence[] | undefined, scrub: number) {
-  if (!evidence?.length) return 0;
-  const raw = evidence.reduce((a, e) => a + (EVIDENCE_HEAT[e.kind] ?? 4), 0);
-  return raw * Math.max(0, 1 - scrub / 85);
-}
-
-/**
- * Heat a post will cost you. Lives here so the composer's projection and the
- * number you actually take are always the same formula.
- */
-function projectHeat(scrub: number, tags: string[], evidence?: Evidence[]) {
-  const exposure =
-    TAGS.filter((t) => tags.includes(t.label)).reduce((a, t) => a + t.heat, 0) + 6;
-  return Math.max(
-    -6,
-    Math.round(
-      exposure * (1 - scrub / 130) +
-        evidenceHeat(evidence, scrub) +
-        (scrub < 8 ? 5 : -3),
-    ),
-  );
-}
 
 export default function Vicegram({
   onBack,
@@ -110,13 +96,11 @@ export default function Vicegram({
   );
   const [caption, setCaption] = useState("");
   const [tags, setTags] = useState<string[]>(["#leonidalive"]);
-  /** Frames shot in Leonida Live this session. They lead the roll. */
-  const [captured, setCaptured] = useState<Frame[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const hasPosts = vice.posts.length > 0;
 
-  /* ---- the shutter hands straight over to the image lab ---- */
+  /* ---- the shutter hands straight to forensic vision ---- */
   const onShoot = (photo: StreetPhoto) => {
     const frame: Frame = {
       src: photo.src,
@@ -124,60 +108,70 @@ export default function Vicegram({
       location: photo.location,
       evidence: photo.evidence,
     };
-    setCaptured((c) => [frame, ...c].slice(0, 12));
-    setMode({ k: "edit", ...frame });
+    vice.dispatch({ type: "captured", frame });
+    vice.mark("shot");
+    setMode({ k: "vision", ...frame });
   };
 
-  /* ---- editor commit -> forensic scan ---- */
-  const onCommit = async (dataUrl: string) => {
+  /* ---- editor commit -> the authoritative scan ---- */
+  const onCommit = async (dataUrl: string, timeline: TimelineStep[]) => {
     if (mode.k !== "edit") return;
-    setMode({
-      k: "scan",
-      src: dataUrl,
-      original: mode.src,
+    const frame: Frame = {
+      src: mode.src,
       title: mode.title,
       location: mode.location,
       sceneId: mode.sceneId,
       evidence: mode.evidence,
+    };
+    setMode({ k: "scan", ...frame, src: dataUrl, original: mode.src });
+
+    const report = await runForensics(mode.src, dataUrl, mode.evidence);
+
+    const previous = vice.attempts[mode.src];
+    vice.dispatch({
+      type: "attempt",
+      key: mode.src,
+      attempt: {
+        scrub: Math.round(report.scrub),
+        heat: heatFor(report, tags, TAGS).final,
+      },
     });
-    let forensics: Forensics;
-    try {
-      forensics = await analyzeEdit(mode.src, dataUrl);
-    } catch {
-      forensics = {
-        altered: 0,
-        intensity: 0,
-        temperature: 0,
-        reframed: false,
-        coverage: 0,
-      };
-    }
-    // let the scanner animation breathe
-    setTimeout(() => {
-      setCaption(pick(CAPTION_SEEDS));
-      setMode({
-        k: "compose",
-        src: dataUrl,
-        original: mode.src,
-        title: mode.title,
-        location: mode.location,
-        sceneId: mode.sceneId,
-        evidence: mode.evidence,
-        forensics,
-      });
-    }, 1900);
+
+    vice.mark("report");
+    setCaption((c) => c || pick(CAPTION_SEEDS));
+    setMode({
+      k: "report",
+      ...frame,
+      src: dataUrl,
+      original: mode.src,
+      report,
+      timeline,
+      previous,
+    });
   };
 
-  const publish = () => {
-    if (mode.k !== "compose") return;
-    const f = mode.forensics;
-    const scrub = scrubScore(f);
+  const backToLab = (m: Scanned) =>
+    setMode({
+      k: "edit",
+      src: m.original,
+      title: m.title,
+      location: m.location,
+      sceneId: m.sceneId,
+      evidence: m.evidence,
+    });
+
+  /* ---- publish + consequences ---- */
+  const publish = (m: Scanned, heat: HeatBreakdown) => {
+    const report = m.report;
+    const scrub = report.scrub;
+    const heatDelta = heat.final;
+
     const chosen = TAGS.filter((t) => tags.includes(t.label));
     const reach = chosen.reduce((a, t) => a + t.reach, 0) + caption.length / 3;
-
-    const heatDelta = projectHeat(scrub, tags, mode.evidence);
     const likes = Math.round(
-      (180 + reach * 26) * (0.7 + f.altered / 90) * (1 + Math.random() * 0.4),
+      (180 + reach * 26) *
+        (0.7 + report.forensics.altered / 90) *
+        (1 + Math.random() * 0.4),
     );
 
     const pool =
@@ -195,30 +189,47 @@ export default function Vicegram({
 
     const post: Post = {
       id: uid(),
-      image: mode.src,
-      original: mode.original,
-      title: mode.title,
-      location: mode.location,
+      image: m.src,
+      original: m.original,
+      title: m.title,
+      location: m.location,
       caption,
       tags,
       likes,
       comments: seedComments,
-      forensics: f,
+      forensics: report.forensics,
       heatDelta,
       at: Date.now(),
     };
 
     vice.dispatch({ type: "post", post });
+    vice.mark("post");
+    if (report.scrub > 20) vice.mark("edit");
     if (heatDelta > 10) vice.dispatch({ type: "crime", crime: pick(CRIMES) });
 
     // If a contract is live, this post is the delivery.
-    const settled = vice.settleContract({
-      event: "post",
-      forensics: f,
-      scrub,
-      tags,
-      sceneId: mode.sceneId,
-      heatDelta,
+    const settled = vice.settleContract(ctxFor(m, tags, heatDelta));
+
+    /*
+     * How identifiable the export still is. With recorded subject rectangles
+     * that is the mean of what survived; without them it falls back to the
+     * whole-frame scrub, same as the forensic pass does.
+     */
+    const confidence = report.findings.length
+      ? Math.round(
+          report.findings.reduce((a, f) => a + (100 - f.concealment), 0) /
+            report.findings.length,
+        )
+      : Math.round(Math.max(0, 100 - scrub));
+
+    // Rolled once, so the radio and the aftermath card say the same thing.
+    const radioLine = dispatchFor(m.location, confidence);
+
+    vice.logConsequence({
+      image: m.src,
+      location: m.location,
+      confidence,
+      dispatch: radioLine,
     });
 
     if (settled) {
@@ -237,25 +248,55 @@ export default function Vicegram({
       );
     }
 
-    vice.toast(
-      heatDelta > 0
-        ? {
-            kind: heatDelta > 12 ? "alert" : "heat",
-            title: `+${heatDelta} HEAT`,
-            body:
-              heatDelta > 12
-                ? "That frame is evidence. Somebody screenshotted it."
-                : "Posted. The algorithm noticed.",
-          }
-        : {
-            kind: "cool",
-            title: `${heatDelta} HEAT`,
-            body: "Scrubbed clean. Forensics got nothing.",
-          },
-    );
+    /* ---- the aftermath, played back one app at a time ---- */
+    const steps: Consequence[] = [
+      {
+        app: "VICEGRAM",
+        tint: "#ff2e97",
+        headline: "POST PUBLISHED",
+        body: `${likes.toLocaleString()} impressions and climbing. Forensic match on the export: ${confidence}%.`,
+        stat: {
+          k: "HEAT",
+          v: `${heatDelta > 0 ? "+" : ""}${heatDelta}`,
+          tint: heatDelta > 4 ? "#ff3b30" : "#9dff3d",
+        },
+        image: m.src,
+      },
+      {
+        app: "SCANNER 7",
+        tint: "#ffb347",
+        headline: "NEW DISPATCH",
+        body: `"${radioLine}"`,
+        stat: {
+          k: "WANTED",
+          v: "★".repeat(Math.max(1, vice.starCount)) || "—",
+          tint: "#ffd36b",
+        },
+      },
+    ];
+
+    if (confidence >= 25) {
+      steps.push({
+        app: "MOST WANTED",
+        tint: "#22e6ff",
+        headline: "NEW EVIDENCE",
+        body: `Your export is on file against ${vice.alias}. The bulletin will print with this frame.`,
+        stat: { k: "EVIDENCE CONFIDENCE", v: `${confidence}%` },
+        image: m.src,
+      });
+    } else {
+      steps.push({
+        app: "MOST WANTED",
+        tint: "#9dff3d",
+        headline: "NOTHING ON FILE",
+        body: "The export was too scrubbed to log. As far as the state is concerned, that photo isn't of anybody.",
+        stat: { k: "EVIDENCE CONFIDENCE", v: `${confidence}%`, tint: "#9dff3d" },
+      });
+    }
 
     setTags(["#leonidalive"]);
-    setMode({ k: "feed" });
+    setCaption("");
+    setMode({ k: "aftermath", steps });
   };
 
   /* ---- live engagement ticker on the feed ---- */
@@ -288,7 +329,8 @@ export default function Vicegram({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode.k, hasPosts, vice.posts[0]?.id, vice.posts[0]?.likes]);
 
-  /* ---------------- leonida live ---------------- */
+  /* ---------------- full-screen stages ---------------- */
+
   if (mode.k === "street") {
     return (
       <StreetMode
@@ -299,24 +341,47 @@ export default function Vicegram({
     );
   }
 
-  /* ---------------- editor overlay ---------------- */
+  if (mode.k === "vision") {
+    const frame: Frame = {
+      src: mode.src,
+      title: mode.title,
+      location: mode.location,
+      sceneId: mode.sceneId,
+      evidence: mode.evidence,
+    };
+    return (
+      <ForensicVision
+        src={mode.src}
+        title={mode.title}
+        location={mode.location}
+        evidence={mode.evidence}
+        onOpenLab={() => {
+          vice.mark("vision");
+          setMode({ k: "edit", ...frame });
+        }}
+        onDiscard={() => setMode({ k: "roll" })}
+      />
+    );
+  }
+
   if (mode.k === "edit") {
-    const caught = mode.evidence ?? [];
+    const caught = mode.evidence;
     return (
       <EditorStage
         image={mode.src}
+        evidence={caught}
         mission={{
           title: mode.title,
           brief: caught.length
             ? `The lens caught ${caught.length} identifiable ${
                 caught.length === 1 ? "subject" : "subjects"
-              }: ${caught.map((e) => e.label).join(", ")}. Whatever you leave in stays in.`
+              }, worth +${rawExposure(caught)} heat. Cover them or keep them — the scan reads those exact rectangles.`
             : "Make it yours — then decide how much of the truth stays in frame.",
           hints: caught.length
             ? [
                 "Stickers & shapes go over faces and plates",
                 "Crop tight to lose the skyline that geotags you",
-                "Grade hard — forensics scores the whole surface",
+                "The rail on the right is reading your canvas live",
               ]
             : [
                 "Filters + grade = style points",
@@ -338,204 +403,270 @@ export default function Vicegram({
         title="VICEGRAM"
         sub={`${vice.handle} · ${vice.followers.toLocaleString()} FOLLOWERS`}
         onBack={onBack}
-        right={
-          <div className="flex items-center gap-2">
-            <Stars count={vice.starCount} size={12} />
-          </div>
-        }
+        right={<Stars count={vice.starCount} size={12} />}
       />
 
       <div className="vice-scroll flex-1 overflow-y-auto">
         {mode.k === "roll" && (
-          <div className="p-4">
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <p className="headline text-2xl">CAMERA ROLL</p>
-                <p className="font-mono text-[10px] tracking-[0.2em] text-white/40">
-                  PICK A FRAME → OPEN THE IMAGE LAB
-                </p>
-              </div>
-              {hasPosts && (
-                <Btn tone="ghost" onClick={() => setMode({ k: "feed" })}>
-                  FEED
-                </Btn>
-              )}
-            </div>
-
-            {/* the 3D camera — this is where new frames come from */}
-            <button
-              onClick={() => setMode({ k: "street" })}
-              className="group relative mb-4 w-full overflow-hidden rounded-2xl border border-vice-cyan/40 bg-gradient-to-br from-vice-plum to-black p-4 text-left transition hover:border-vice-cyan hover:shadow-[0_0_40px_-10px_rgba(34,230,255,0.8)]"
-            >
-              <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_80%_20%,rgba(255,46,151,0.28),transparent_60%)]" />
-              <div className="relative flex items-center gap-3">
-                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-vice-cyan to-vice-pink text-xl text-vice-void">
-                  ▶
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-[13px] font-bold tracking-wide">
-                    SHOOT IN LEONIDA LIVE
-                  </p>
-                  <p className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-vice-cyan/80">
-                    WALK THE BLOCK IN 3D · FRAME IT · THE SHUTTER OPENS THE LAB
-                  </p>
-                </div>
-                <span className="shrink-0 rounded-full bg-vice-cyan/15 px-2 py-0.5 font-mono text-[8px] tracking-[0.14em] text-vice-cyan">
-                  3D
-                </span>
-              </div>
-            </button>
-
-            {captured.length > 0 && (
-              <div className="mb-4">
-                <p className="font-mono text-[9px] tracking-[0.24em] text-white/40">
-                  SHOT IN LEONIDA · {captured.length}
-                </p>
-                <div className="mt-2 flex gap-2 overflow-x-auto no-scrollbar">
-                  {captured.map((f, i) => (
-                    <button
-                      key={`${f.title}-${i}`}
-                      onClick={() => setMode({ k: "edit", ...f })}
-                      className="relative h-24 w-20 shrink-0 overflow-hidden rounded-lg border border-vice-cyan/40 transition hover:border-vice-cyan"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={f.src}
-                        alt={f.title}
-                        className="h-full w-full object-cover"
-                      />
-                      {!!f.evidence?.length && (
-                        <span className="absolute right-1 top-1 rounded bg-vice-blood px-1 font-mono text-[8px] font-bold text-vice-void">
-                          {f.evidence.length}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-3">
-              {shots.map((s) => (
-                <button
-                  key={s.id}
-                  disabled={!s.src}
-                  onClick={() =>
-                    s.src &&
-                    setMode({
-                      k: "edit",
-                      src: s.src,
-                      title: s.title,
-                      location: s.location,
-                      sceneId: s.id,
-                    })
-                  }
-                  className="group relative aspect-4/5 overflow-hidden rounded-xl border border-white/10 bg-vice-plum text-left transition hover:border-vice-pink/70 hover:shadow-[0_0_30px_-8px_rgba(255,46,151,0.9)] disabled:cursor-wait"
-                >
-                  {s.src ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={s.src}
-                      alt={s.title}
-                      className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
-                    />
-                  ) : (
-                    <div className="sweep absolute inset-x-0 h-20 bg-gradient-to-b from-transparent via-vice-pink/25 to-transparent" />
-                  )}
-                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-2.5">
-                    <p className="truncate text-[11px] font-semibold">{s.title}</p>
-                    <p className="font-mono text-[8px] tracking-[0.18em] text-vice-cyan">
-                      {s.location} · {s.time}
-                    </p>
-                  </div>
-                  <span className="absolute right-2 top-2 rounded-md bg-black/60 px-1.5 py-0.5 font-mono text-[8px] tracking-[0.14em] text-white/70 opacity-0 transition group-hover:opacity-100">
-                    EDIT
-                  </span>
-                </button>
-              ))}
-
-              <button
-                onClick={() => fileRef.current?.click()}
-                className="flex aspect-4/5 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/20 text-white/45 transition hover:border-vice-cyan hover:text-vice-cyan"
-              >
-                <span className="text-3xl leading-none">+</span>
-                <span className="px-3 text-center font-mono text-[9px] leading-relaxed tracking-[0.16em]">
-                  IMPORT FROM
-                  <br />
-                  YOUR DEVICE
-                </span>
-              </button>
-            </div>
-
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={async (e) => {
-                const f = e.target.files?.[0];
-                if (!f) return;
-                const src = await readFile(f);
-                setMode({
-                  k: "edit",
-                  src,
-                  title: "IMPORTED EVIDENCE",
-                  location: "UNKNOWN",
-                });
-                e.target.value = "";
-              }}
-            />
-
-            <p className="mt-4 text-center font-mono text-[9px] leading-relaxed tracking-[0.14em] text-white/30">
-              EVERY SHOT IS PAINTED ON A CANVAS AT RUNTIME.
-              <br />
-              NOTHING HERE LEAVES YOUR BROWSER.
-            </p>
-          </div>
+          <Roll
+            shots={shots}
+            captured={vice.captured}
+            hasPosts={hasPosts}
+            onFeed={() => setMode({ k: "feed" })}
+            onStreet={() => setMode({ k: "street" })}
+            onFrame={(f) =>
+              setMode(f.evidence.length ? { k: "vision", ...f } : { k: "edit", ...f })
+            }
+            onImport={() => fileRef.current?.click()}
+          />
         )}
 
-        {mode.k === "scan" && <Scanner src={mode.src} />}
+        {mode.k === "scan" && <ScanCurtain src={mode.src} />}
+
+        {mode.k === "report" && (
+          <ForensicReport
+            original={mode.original}
+            edited={mode.src}
+            evidence={mode.evidence}
+            report={mode.report}
+            timeline={mode.timeline}
+            previous={mode.previous}
+            heat={heatFor(mode.report, tags, TAGS)}
+            onBackToLab={() => backToLab(mode)}
+            onPublish={() => setMode({ k: "compose", ...modeAsScanned(mode) })}
+          />
+        )}
 
         {mode.k === "compose" && (
           <Composer
-            src={mode.src}
-            forensics={mode.forensics}
+            frame={mode}
             caption={caption}
             setCaption={setCaption}
             tags={tags}
             setTags={setTags}
-            onPublish={publish}
-            sceneId={mode.sceneId}
-            evidence={mode.evidence}
-            onBackToEdit={() =>
-              setMode({
-                k: "edit",
-                src: mode.original,
-                title: mode.title,
-                location: mode.location,
-                sceneId: mode.sceneId,
-                evidence: mode.evidence,
-              })
-            }
+            onPublish={(heat) => publish(modeAsScanned(mode), heat)}
+            onBackToReport={() => setMode({ k: "report", ...modeAsScanned(mode) })}
           />
         )}
 
-        {mode.k === "feed" && (
-          <Feed onNew={() => setMode({ k: "roll" })} />
+        {mode.k === "aftermath" && (
+          <Consequences steps={mode.steps} onDone={() => setMode({ k: "feed" })} />
+        )}
+
+        {mode.k === "feed" && <Feed onNew={() => setMode({ k: "roll" })} />}
+      </div>
+
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          if (!f) return;
+          const src = await readFile(f);
+          setMode({
+            k: "edit",
+            src,
+            title: "IMPORTED EVIDENCE",
+            location: "UNKNOWN",
+            evidence: [],
+          });
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+/** Strips the discriminant so a scanned stage can be handed to another one. */
+function modeAsScanned(m: Scanned & { k: string }): Scanned {
+  return {
+    src: m.src,
+    original: m.original,
+    title: m.title,
+    location: m.location,
+    sceneId: m.sceneId,
+    evidence: m.evidence,
+    report: m.report,
+    timeline: m.timeline,
+    previous: m.previous,
+  };
+}
+
+/** Everything a contract objective is allowed to see about this delivery. */
+function ctxFor(m: Scanned, tags: string[], heatDelta: number): ContractCtx {
+  return {
+    event: "post",
+    forensics: m.report.forensics,
+    scrub: m.report.scrub,
+    tags,
+    sceneId: m.sceneId,
+    heatDelta,
+    findings: m.report.findings.map((f) => ({
+      kind: f.kind,
+      label: f.label,
+      status: f.status,
+      concealment: f.concealment,
+    })),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* camera roll                                                         */
+/* ------------------------------------------------------------------ */
+
+function Roll({
+  shots,
+  captured,
+  hasPosts,
+  onFeed,
+  onStreet,
+  onFrame,
+  onImport,
+}: {
+  shots: { id: string; src: string | null; title: string; location: string; time: string }[];
+  captured: Frame[];
+  hasPosts: boolean;
+  onFeed: () => void;
+  onStreet: () => void;
+  onFrame: (f: Frame) => void;
+  onImport: () => void;
+}) {
+  return (
+    <div className="p-4">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <p className="headline text-2xl">CAMERA ROLL</p>
+          <p className="font-mono text-[10px] tracking-[0.2em] text-white/40">
+            PICK A FRAME → OPEN THE IMAGE LAB
+          </p>
+        </div>
+        {hasPosts && (
+          <Btn tone="ghost" onClick={onFeed}>
+            FEED
+          </Btn>
         )}
       </div>
+
+      {/* the 3D camera — this is where new frames come from */}
+      <button
+        onClick={onStreet}
+        className="group relative mb-4 w-full overflow-hidden rounded-2xl border border-vice-cyan/40 bg-gradient-to-br from-vice-plum to-black p-4 text-left transition hover:border-vice-cyan hover:shadow-[0_0_40px_-10px_rgba(34,230,255,0.8)]"
+      >
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_80%_20%,rgba(255,46,151,0.28),transparent_60%)]" />
+        <div className="relative flex items-center gap-3">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-vice-cyan to-vice-pink text-xl text-vice-void">
+            ▶
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-bold tracking-wide">
+              SHOOT IN LEONIDA LIVE
+            </p>
+            <p className="font-mono text-[9px] leading-relaxed tracking-[0.14em] text-vice-cyan/80">
+              WALK THE BLOCK IN 3D · FRAME IT · THE LENS LOGS THE EVIDENCE
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full bg-vice-cyan/15 px-2 py-0.5 font-mono text-[8px] tracking-[0.14em] text-vice-cyan">
+            3D
+          </span>
+        </div>
+      </button>
+
+      {captured.length > 0 && (
+        <div className="mb-4">
+          <p className="font-mono text-[9px] tracking-[0.24em] text-white/40">
+            SHOT IN LEONIDA · {captured.length}
+          </p>
+          <div className="mt-2 flex gap-2 overflow-x-auto no-scrollbar">
+            {captured.map((f, i) => (
+              <button
+                key={`${f.title}-${i}`}
+                onClick={() => onFrame(f)}
+                className="relative h-24 w-20 shrink-0 overflow-hidden rounded-lg border border-vice-cyan/40 transition hover:border-vice-cyan"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={f.src} alt={f.title} className="h-full w-full object-cover" />
+                {f.evidence.length > 0 && (
+                  <span className="absolute right-1 top-1 rounded bg-vice-blood px-1 font-mono text-[8px] font-bold text-vice-void">
+                    {f.evidence.length}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        {shots.map((s) => (
+          <button
+            key={s.id}
+            disabled={!s.src}
+            onClick={() =>
+              s.src &&
+              onFrame({
+                src: s.src,
+                title: s.title,
+                location: s.location,
+                sceneId: s.id,
+                evidence: [],
+              })
+            }
+            className="group relative aspect-4/5 overflow-hidden rounded-xl border border-white/10 bg-vice-plum text-left transition hover:border-vice-pink/70 hover:shadow-[0_0_30px_-8px_rgba(255,46,151,0.9)] disabled:cursor-wait"
+          >
+            {s.src ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={s.src}
+                alt={s.title}
+                className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
+              />
+            ) : (
+              <div className="sweep absolute inset-x-0 h-20 bg-gradient-to-b from-transparent via-vice-pink/25 to-transparent" />
+            )}
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 to-transparent p-2.5">
+              <p className="truncate text-[11px] font-semibold">{s.title}</p>
+              <p className="font-mono text-[8px] tracking-[0.18em] text-vice-cyan">
+                {s.location} · {s.time}
+              </p>
+            </div>
+            <span className="absolute right-2 top-2 rounded-md bg-black/60 px-1.5 py-0.5 font-mono text-[8px] tracking-[0.14em] text-white/70 opacity-0 transition group-hover:opacity-100">
+              EDIT
+            </span>
+          </button>
+        ))}
+
+        <button
+          onClick={onImport}
+          className="flex aspect-4/5 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/20 text-white/45 transition hover:border-vice-cyan hover:text-vice-cyan"
+        >
+          <span className="text-3xl leading-none">+</span>
+          <span className="px-3 text-center font-mono text-[9px] leading-relaxed tracking-[0.16em]">
+            IMPORT FROM
+            <br />
+            YOUR DEVICE
+          </span>
+        </button>
+      </div>
+
+      <p className="mt-4 text-center font-mono text-[9px] leading-relaxed tracking-[0.14em] text-white/30">
+        EVERY SHOT IS PAINTED ON A CANVAS AT RUNTIME.
+        <br />
+        NOTHING HERE LEAVES YOUR BROWSER.
+      </p>
     </div>
   );
 }
 
 /* ------------------------------------------------------------------ */
 
-function Scanner({ src }: { src: string }) {
+function ScanCurtain({ src }: { src: string }) {
   const lines = [
-    "hashing frame…",
+    "hashing export…",
     "comparing against source plate…",
-    "measuring altered surface…",
-    "estimating identifiability…",
+    "re-reading subject rectangles…",
+    "pricing what survived…",
   ];
   const [i, setI] = useState(0);
   useEffect(() => {
@@ -564,145 +695,52 @@ function Scanner({ src }: { src: string }) {
 }
 
 /* ------------------------------------------------------------------ */
-
-function Bar({ label, value, tint }: { label: string; value: number; tint: string }) {
-  return (
-    <div>
-      <div className="flex items-baseline justify-between">
-        <span className="font-mono text-[9px] tracking-[0.2em] text-white/40">
-          {label}
-        </span>
-        <span className="font-mono text-[10px] tabular-nums" style={{ color: tint }}>
-          {value}%
-        </span>
-      </div>
-      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/10">
-        <div
-          className="h-full rounded-full transition-all duration-1000"
-          style={{ width: `${Math.min(100, value)}%`, background: tint }}
-        />
-      </div>
-    </div>
-  );
-}
+/* composer                                                            */
+/* ------------------------------------------------------------------ */
 
 function Composer({
-  src,
-  forensics,
+  frame,
   caption,
   setCaption,
   tags,
   setTags,
-  sceneId,
-  evidence,
   onPublish,
-  onBackToEdit,
+  onBackToReport,
 }: {
-  src: string;
-  forensics: Forensics;
+  frame: Scanned;
   caption: string;
   setCaption: (v: string) => void;
   tags: string[];
   setTags: (v: string[]) => void;
-  sceneId?: string;
-  evidence?: Evidence[];
-  onPublish: () => void;
-  onBackToEdit: () => void;
+  onPublish: (heat: HeatBreakdown) => void;
+  onBackToReport: () => void;
 }) {
-  const scrub = Math.round(scrubScore(forensics));
-  const verdict =
-    scrub > 60
-      ? { t: "UNIDENTIFIABLE", c: "#9dff3d", s: "Forensics can't place this frame. Post freely." }
-      : scrub > 28
-        ? { t: "PARTIALLY SCRUBBED", c: "#22e6ff", s: "Recognisable, but you covered the worst of it." }
-        : { t: "RAW FRAME", c: "#ff3b30", s: "Everything in this shot is admissible. Your call." };
-
-  const projected = projectHeat(scrub, tags, evidence);
-  const exposed = Math.round(evidenceHeat(evidence, scrub));
+  // Recomputed on every tag toggle, from the same function that takes the heat.
+  const heat = heatFor(frame.report, tags, TAGS);
 
   return (
     <div className="p-4 pb-6 rise-in">
       <div className="flex gap-3">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={src}
+          src={frame.src}
           alt="edited"
           className="h-28 w-24 shrink-0 rounded-lg border border-white/15 object-cover"
         />
         <div className="min-w-0 flex-1">
-          <p
-            className="headline text-xl leading-none"
-            style={{ color: verdict.c, textShadow: `0 0 18px ${verdict.c}88` }}
-          >
-            {verdict.t}
+          <p className="headline text-xl leading-none">PUBLISH TO VICEGRAM</p>
+          <p className="mt-1 text-[11px] leading-snug text-white/55">
+            Scrub score {Math.round(frame.report.scrub)}%. Tags add exposure on top
+            of what you left in the frame.
           </p>
-          <p className="mt-1 text-[11px] leading-snug text-white/55">{verdict.s}</p>
           <button
-            onClick={onBackToEdit}
+            onClick={onBackToReport}
             className="mt-2 font-mono text-[9px] tracking-[0.18em] text-vice-cyan underline underline-offset-4"
           >
-            ↩ BACK TO THE IMAGE LAB
+            ↩ BACK TO THE FORENSIC REPORT
           </button>
         </div>
       </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
-        <Bar label="SURFACE ALTERED" value={forensics.altered} tint="#ff2e97" />
-        <Bar label="OVERLAY COVERAGE" value={forensics.coverage} tint="#22e6ff" />
-        <Bar label="GRADE SHIFT" value={Math.abs(forensics.temperature)} tint="#ffb347" />
-        <Bar label="SCRUB RATING" value={scrub} tint="#9dff3d" />
-      </div>
-      {forensics.reframed && (
-        <p className="mt-2 font-mono text-[9px] tracking-[0.16em] text-vice-lime">
-          ✓ REFRAMED — ORIGINAL COMPOSITION NO LONGER MATCHES
-        </p>
-      )}
-
-      {/*
-        Only frames shot in Leonida Live carry this — the engine knows exactly
-        what was visible and unoccluded when the shutter fired, so the editor
-        session has a concrete target instead of a vibe.
-      */}
-      {!!evidence?.length && (
-        <div
-          className="mt-4 rounded-xl border p-3"
-          style={{
-            borderColor: exposed > 4 ? "#ff3b3055" : "#9dff3d55",
-            background: exposed > 4 ? "#ff3b300d" : "#9dff3d0d",
-          }}
-        >
-          <div className="flex items-baseline justify-between">
-            <p className="font-mono text-[9px] tracking-[0.22em] text-white/50">
-              CAUGHT BY THE LENS
-            </p>
-            <p
-              className="font-mono text-[11px] tabular-nums"
-              style={{ color: exposed > 4 ? "#ff3b30" : "#9dff3d" }}
-            >
-              {exposed > 0 ? `+${exposed} HEAT` : "NEUTRALISED"}
-            </p>
-          </div>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {evidence.map((e) => (
-              <span
-                key={e.label}
-                className={`rounded-md border px-1.5 py-0.5 font-mono text-[9px] tracking-[0.1em] ${
-                  exposed > 4
-                    ? "border-vice-blood/50 text-vice-blood"
-                    : "border-vice-lime/50 text-vice-lime line-through"
-                }`}
-              >
-                {e.label}
-              </span>
-            ))}
-          </div>
-          <p className="mt-2 text-[11px] leading-snug text-white/55">
-            {exposed > 4
-              ? "Still identifiable. Go back to the lab and cover it — scrub rating discounts every one of these."
-              : "Scrubbed past the point of identification. Nothing here to match."}
-          </p>
-        </div>
-      )}
 
       <div className="mt-5">
         <p className="font-mono text-[10px] tracking-[0.24em] text-white/45">CAPTION</p>
@@ -740,16 +778,7 @@ function Composer({
         </div>
       </div>
 
-      <ContractCheck
-        ctx={{
-          event: "post",
-          forensics,
-          scrub,
-          tags,
-          sceneId,
-          heatDelta: projected,
-        }}
-      />
+      <ContractCheck ctx={ctxFor(frame, tags, heat.final)} />
 
       <div className="mt-5 flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2.5">
         <div>
@@ -757,13 +786,13 @@ function Composer({
             PROJECTED EXPOSURE
           </p>
           <p
-            className={`font-mono text-lg tabular-nums ${projected > 0 ? "text-vice-pink" : "text-vice-lime"}`}
+            className={`font-mono text-lg tabular-nums ${heat.final > 0 ? "text-vice-pink" : "text-vice-lime"}`}
           >
-            {projected > 0 ? "+" : ""}
-            {projected} HEAT
+            {heat.final > 0 ? "+" : ""}
+            {heat.final} HEAT
           </p>
         </div>
-        <Btn onClick={onPublish}>POST IT</Btn>
+        <Btn onClick={() => onPublish(heat)}>POST IT</Btn>
       </div>
     </div>
   );

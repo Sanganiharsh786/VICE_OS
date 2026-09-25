@@ -27,24 +27,25 @@ gain drops.** Post it raw with `#trunkfull` and the whole state hears about it.
 That's the loop: *the image editor is the gameplay.*
 
 ```
-LEONIDA LIVE (real-time 3D)  →  shutter  →  IMAGE LAB (React Image Editor)
-   walk · frame · shoot          ↓             crop / grade / cover
-                          evidence register        ↓
-                       (faces, plates, landmarks)  forensic diff
-                                   ↘               ↓
-                                    scored against your export → heat ↑↓ → stars → bounty
+LEONIDA LIVE  →  FORENSIC VISION  →  IMAGE LAB  →  FORENSIC REPORT  →  CONSEQUENCES
+walk · shoot     brackets + prices    cover it     before / after       radio · bulletin
+                 what the lens        crop it      scrub score          heat · stars
+                 caught, per box      grade it     heat breakdown       bounty · contract
 ```
+
+Take the same photograph twice and edit it two different ways, and you get two different
+cities to walk back into. That is the whole pitch.
 
 ## Six apps, four of them built on the editor
 
 | App | What you edit | What comes out |
 | --- | --- | --- |
-| **LEONIDA LIVE** | — | A real-time 3D block you walk in third person. The shutter renders a 1080×1350 frame **and a list of every identifiable subject the lens caught**, then opens the Image Lab on it |
-| **THE FIXER** | — | Timed contracts scored **entirely on the forensic diff of your export**: payouts, heat swings, a rank and a ledger |
-| **VICEGRAM** | A shot from the procedurally painted camera roll, or your own photo | A post, a forensics report, and a change to your heat |
-| **MOST WANTED** | A deliberately faceless booking plate — *you* paint the suspect | A composited WANTED bulletin with your live bounty, rap sheet and stars, downloadable as PNG |
+| **LEONIDA LIVE** | — | A real-time 3D block you walk in third person. The shutter renders a 1080×1350 frame **plus the rectangle every identifiable subject filled**, then runs FORENSIC VISION on it |
+| **THE FIXER** | — | Timed contracts in two opposing categories, scored **entirely on the forensic scan of your export**: payouts, heat swings, a rank and a ledger |
+| **VICEGRAM** | A frame you shot in 3D, a procedurally painted scene, or your own photo | A before/after forensic report, an itemised heat bill, a post, and an aftermath that plays out across the other apps |
+| **MOST WANTED** | A blank booking plate — or **a photo you already published**, pulled from the state's evidence file | A composited WANTED bulletin with your live bounty, rap sheet and stars, downloadable as PNG |
 | **LEONIDA DMV** | Your license portrait | A holographic state ID card with guilloche print, ghost portrait and a generated signature, downloadable as PNG |
-| **SCANNER 7** | — | Radio + LSO dispatch whose chatter rate scales with your heat, plus a "lay low" cooldown to cool off |
+| **SCANNER 7** | — | Radio + LSO dispatch whose chatter rate scales with your heat — and which calls **your own posts** in by name, with a line written from what the scan actually found |
 
 ## LEONIDA LIVE: the frames are yours now
 
@@ -125,10 +126,23 @@ delivered is what the forensic scan finds in your export
 > **THE CLEANER** — *"I don't care what it looks like when you're done. I care that nobody
 > can match it to the frame it came from."* · Scrub rating 66% or higher · 150s · $9,850 · **-7 heat**
 
-Nine job templates roll against your current heat, so the board is never impossible and never
-free. Objectives map one-to-one onto editor tools — `coverage` wants stickers and shapes,
-`grade shift` wants the filter panel, `reframe` wants crop or resize, and **GHOST POST** wants
-you to publish without moving the needle a single degree.
+Contracts come in two categories that pull in **opposite directions**, and the board always
+offers at least one of each:
+
+> **CLEANUP** — *hide what the lens caught.* **THE GHOST FRAME**: every face, plate and
+> landmark in the export unidentifiable · 240s · ~$27,000 · **-12 heat**
+
+> **EVIDENCE** — *keep it readable.* **THE WITNESS**: a face still clearly identifiable,
+> scrub rating 30% or lower · 210s · ~$29,000 · **+18 heat**
+
+So the decision is never "cover everything". It's *"do I make this photo safer, or more
+valuable?"* — and the answer is paid for in heat either way.
+
+Thirteen job templates roll against your current heat, so the board is never impossible and
+never free. Objectives map one-to-one onto editor tools — `coverage` wants stickers and shapes,
+`grade shift` wants the filter panel, `reframe` wants crop or resize, `hideKind("FACE")` wants
+a sticker on every bracket, and **GHOST POST** wants you to publish without moving the needle
+a single degree.
 
 - A live countdown rides under the status bar in **every** app, so you can feel the clock
   while you're inside the Image Lab.
@@ -154,6 +168,11 @@ out into, wrapped in its own OS chrome ([`src/components/EditorStage.tsx`](src/c
   export. (`getImage()` returns the working canvas *before* the active filter preset is baked
   in — a filter-only edit would otherwise come back byte-identical and read 0% on the
   forensic diff. It's kept as a fallback so the player can never get stuck in the lab.)
+- **A live forensic rail.** When the frame carries evidence, the lab grows a panel that
+  samples the working canvas every 1.4s, re-runs the region maths on it and shows
+  identifiability draining per subject, an estimated heat, and an **edit history** naming
+  each step it observed (`SUBJECT B COVERED → 41%`). It is labelled an estimate on purpose —
+  the authoritative scan runs on the exported file.
 - **`onCancel`, `onLoadError`, `onError`** are all wired; `Escape` discards.
 - Mounted through `next/dynamic` with a themed skeleton, `options` hoisted to a module
   constant so a re-render never triggers a remount.
@@ -163,8 +182,11 @@ laminated ID — instead of just being downloaded.
 
 ## Forensics: reading the edit
 
-[`analyzeEdit()`](src/lib/art.ts) normalises the original and the editor's export to 128×128
-and diffs them pixel by pixel:
+Every number in this project is a measurement of two real images — the frame the camera
+produced and the file the editor exported. Nothing is invented for the UI.
+
+**Whole frame** ([`analyzeEdit()`](src/lib/art.ts)) normalises both to 128×128 and diffs them
+pixel by pixel:
 
 | Metric | Meaning |
 | --- | --- |
@@ -173,8 +195,30 @@ and diffs them pixel by pixel:
 | `temperature` | warm/cool shift your grade introduced |
 | `reframed` | whether crop/resize changed the composition |
 
-Those roll into a **scrub rating**, and the scrub rating discounts the heat your tags would
-otherwise earn. Aspect-ratio changes are handled, so cropping counts too.
+Those roll into a **scrub rating**. Aspect-ratio changes are handled, so cropping counts too.
+
+**Per subject** ([`src/lib/forensics.ts`](src/lib/forensics.ts)) is what turns the edit into a
+game. The engine records the rectangle each identifiable subject filled at the instant the
+shutter fired, and the scan re-reads *those exact rectangles* in the export. Inside a box,
+each pixel's channel delta is bucketed — over 150 means it was painted over (full credit),
+over 48 means it moved far enough to defeat a matcher (partial credit) — and the mean is that
+subject's **concealment**, 0–100, which maps to `VISIBLE / PARTIAL / HIDDEN / REMOVED`.
+
+Two corrections keep that honest:
+
+- **A frame-wide noise floor is subtracted from every region.** Exporting resamples and
+  re-encodes the whole picture, and a global filter moves every pixel at once. That is a
+  property of the frame, not of the subject — without the correction, one filter would read
+  as though every face had been covered. What's left is change that happened *here and not
+  everywhere*, which is exactly what covering a face is.
+- **A reframed export skips the floor**, because the original coordinates no longer address
+  the same content at all; the raw reading already answers the question the report asks,
+  which is whether the subject is still recoverable from this file at this spot.
+
+Heat is then itemised rather than asserted — `FACE +9 · PLATE +6 · TAGS +2 · PUBLISHING +6 ·
+RAW EXPOSURE +41 · SCRUB DISCOUNT −30 · **FINAL HEAT +8**` — and the composer's projection and
+the heat you actually take come from the same function, so the number you're shown is the
+number you get.
 
 ## Everything is drawn at runtime
 
@@ -218,16 +262,30 @@ npm run build && npm start
 
 ## Try this first
 
+**In a hurry?** First launch plays a four-card intro and then offers **JUDGE MODE** — a card
+under the status bar that names the single next action and takes you there. It walks the
+whole loop in about ninety seconds. You can re-open it any time from the home screen.
+
+Otherwise:
+
 1. Let it boot, tap to unlock, open **THE FIXER** and take a contract — the clock starts.
 2. Open **LEONIDA LIVE**. `WASD` to walk, `Shift` to sprint, mouse to look. Get close to
-   a pedestrian or a parked car and watch the **IN FRAME** readout light up.
+   a pedestrian or a parked car and watch live brackets snap onto them.
 3. Press `F` to raise the phone, frame the 4:5 shot, and hit the shutter.
-4. The Image Lab opens on your photo, with a brief naming everything the lens caught.
-5. Sticker over the faces, crop out the tower, push the grade.
-6. Hit **RUN FORENSICS** — the composer prices the evidence you *didn't* cover.
-7. Not there yet? Go back to the lab. Then post it and watch heat, stars, bounty and the
-   dispatch feed react. Sprint past a pedestrian at heat 45+ and they'll run from you.
-8. Open **MOST WANTED**, paint a face on the blank booking plate, and print your bulletin.
+4. **FORENSIC VISION** brackets every subject the lens caught and prices the frame —
+   *3 IDENTIFIABLE SUBJECTS · POTENTIAL EXPOSURE +20 HEAT* — before you touch the editor.
+5. The Image Lab opens with those rectangles on the rail. Sticker over the faces, crop out
+   the tower, push the grade, and watch identifiability drain per subject as you work.
+6. Hit **RUN FORENSICS**. The report puts the capture next to the export, calls each subject
+   `VISIBLE → HIDDEN`, and itemises the heat. Hide every one and you get a **PERFECT SCRUB**.
+7. Not there yet? **RETURN TO LAB** — or **PUBLISH ANYWAY** and take the consequences.
+8. Publish, and watch the aftermath play out app by app: the post lands, **SCANNER 7** calls
+   your photo in over the radio, and **MOST WANTED** files your own export as evidence
+   against you with a match confidence.
+9. **Now the good bit.** Go back to that same frame in the camera roll and edit it the other
+   way. The report will show you both runs side by side: *same photo, different outcome.*
+10. Open **MOST WANTED** and print a bulletin using the photo you edited. Sprint past a
+    pedestrian at heat 40+ and they'll run from you.
 
 ## Project layout
 
@@ -236,9 +294,17 @@ src/
   app/            layout, page, icon, OG image, theme
   components/
     ViceOS.tsx      phone shell, boot / lock / home, desktop side panels
-    EditorStage.tsx the Image Lab — the React Image Editor wrapper
+    EditorStage.tsx the Image Lab — the React Image Editor wrapper + forensic rail
+    Onboarding.tsx  the four-card intro
+    JudgeMode.tsx   guided walkthrough of the whole loop
     Backdrop.tsx    animated Leonida sunset
     ui.tsx          stars, heat meter, buttons, panels
+    forensic/
+      ForensicVision.tsx   post-shutter scan: brackets, subjects, exposure
+      ForensicReport.tsx   before/after, verdict, heat breakdown, perfect scrub
+      Consequences.tsx     the aftermath, played back one app at a time
+      EvidenceBoxes.tsx    the scanning brackets, shared by every surface
+      useLiveForensics.ts  live sampling of the editor canvas + edit history
     apps/           Contracts, Vicegram, MostWanted, LeonidaID, Scanner,
                     StreetMode (the Leonida Live shell, HUD and shutter)
   lib/
@@ -247,9 +313,11 @@ src/
       locomotion.ts gait solver, two-bone IK, full-body procedural animation
       city.ts       the block, its canvas textures and the evidence register
       engine.ts     renderer, camera rig, crowd, post chain, photo capture
-    art.ts          procedural scenes, booking plates, forensic diff
+    art.ts          procedural scenes, booking plates, whole-frame diff
+    evidence.ts     evidence kinds, their heat prices, their rectangles
+    forensics.ts    per-subject scan, scrub score, heat breakdown, heat tiers
     compose.ts      WANTED bulletin + Leonida ID compositors
-    contracts.ts    job templates, objectives, scoring
+    contracts.ts    job templates, objectives, scoring, the two categories
     store.tsx       heat / stars / bounty / posts / contracts state
     copy.ts         all in-world writing
 ```

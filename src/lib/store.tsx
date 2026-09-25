@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import type { Forensics } from "./art";
+import type { Evidence } from "./evidence";
 import { FIRST_NAMES, LAST_NAMES, pick } from "./copy";
 import {
   evaluate,
@@ -50,6 +51,41 @@ export type Toast = {
   body?: string;
 };
 
+/** A line the player's own post put on the police radio. */
+export type Radio = {
+  id: string;
+  at: number;
+  body: string;
+  /** Marks it as caused by the player, so Scanner 7 can highlight it. */
+  onYou: boolean;
+};
+
+/**
+ * The bulletin the state is building out of the player's published photos.
+ * MOST WANTED reads this, so the picture on the poster is a picture the
+ * player edited.
+ */
+export type EvidenceRecord = {
+  id: string;
+  image: string;
+  location: string;
+  /** 0-100. How identifiable the export still was. */
+  confidence: number;
+  at: number;
+};
+
+/** A frame shot in Leonida Live this session, with what the lens caught. */
+export type CapturedFrame = {
+  src: string;
+  title: string;
+  location: string;
+  sceneId?: string;
+  evidence: Evidence[];
+};
+
+/** What one run at a given source frame came out at. */
+export type Attempt = { scrub: number; heat: number };
+
 export type State = {
   alias: string;
   handle: string;
@@ -75,7 +111,41 @@ export type State = {
   failed: number;
   /** Last settlement, so the app can show a payout screen. */
   lastResult: ContractResult | null;
+
+  /* ---- consequences ---- */
+  /** Dispatch lines the player's own posts generated. Session-only. */
+  radio: Radio[];
+  /** Evidence the state has logged against the player. Session-only. */
+  records: EvidenceRecord[];
+  /** Has the player been through the intro? Persisted. */
+  onboarded: boolean;
+  /** Beats of the core loop the player has hit. Drives JUDGE MODE. */
+  beats: string[];
+  /** Is the guided walkthrough on? */
+  judge: boolean;
+
+  /* ---- the camera ---- */
+  /**
+   * Frames shot in Leonida Live this session, and every forensic scan run
+   * against each source frame. Both live here rather than inside VICEGRAM so
+   * that walking back out to the home screen doesn't throw away the run —
+   * re-editing the same photograph and comparing the two outcomes is the
+   * point of the whole project.
+   */
+  captured: CapturedFrame[];
+  attempts: Record<string, Attempt>;
 };
+
+/** The loop, in order. JUDGE MODE walks a first-timer down this list. */
+export const BEATS = [
+  { id: "fixer", label: "Take a contract from THE FIXER" },
+  { id: "shot", label: "Shoot a frame in LEONIDA LIVE" },
+  { id: "vision", label: "Read the FORENSIC VISION scan" },
+  { id: "edit", label: "Cover the evidence in the IMAGE LAB" },
+  { id: "report", label: "Run forensics on your export" },
+  { id: "post", label: "Publish it and take the heat" },
+  { id: "wanted", label: "See it land in MOST WANTED" },
+] as const;
 
 type Action =
   | { type: "boot" }
@@ -93,6 +163,13 @@ type Action =
   | { type: "accept"; contract: Contract; deadline: number }
   | { type: "settle"; result: ContractResult }
   | { type: "clearResult" }
+  | { type: "radio"; line: Radio }
+  | { type: "record"; record: EvidenceRecord }
+  | { type: "onboarded" }
+  | { type: "beat"; beat: string }
+  | { type: "judge"; on: boolean }
+  | { type: "captured"; frame: CapturedFrame }
+  | { type: "attempt"; key: string; attempt: Attempt }
   | { type: "wipe" };
 
 export const STAR_STEPS = [0, 12, 30, 50, 72, 90];
@@ -126,6 +203,13 @@ function initial(): State {
     completed: 0,
     failed: 0,
     lastResult: null,
+    radio: [],
+    records: [],
+    onboarded: false,
+    beats: [],
+    judge: false,
+    captured: [],
+    attempts: {},
   };
 }
 
@@ -194,11 +278,34 @@ function reducer(state: State, action: Action): State {
     }
     case "clearResult":
       return { ...state, lastResult: null };
+    case "radio":
+      return { ...state, radio: [...state.radio, action.line].slice(-12) };
+    case "record":
+      return { ...state, records: [action.record, ...state.records].slice(0, 8) };
+    case "onboarded":
+      return { ...state, onboarded: true };
+    case "beat":
+      return state.beats.includes(action.beat)
+        ? state
+        : { ...state, beats: [...state.beats, action.beat] };
+    case "judge":
+      return { ...state, judge: action.on };
+    case "captured":
+      return {
+        ...state,
+        captured: [action.frame, ...state.captured].slice(0, 12),
+      };
+    case "attempt":
+      return {
+        ...state,
+        attempts: { ...state.attempts, [action.key]: action.attempt },
+      };
     case "wipe":
       return {
         ...initial(),
         booted: true,
         ready: true,
+        onboarded: true,
         alias: state.alias,
         handle: state.handle,
       };
@@ -234,6 +341,20 @@ type Store = State & {
    * could be about. Returns the settlement if this event closed a job.
    */
   settleContract: (ctx: ContractCtx) => ContractResult | null;
+  /**
+   * A published photo has consequences in three places at once: the radio,
+   * the evidence file, and the heat bar. Routing them through one call keeps
+   * the apps from each inventing their own version of the aftermath.
+   */
+  logConsequence: (a: {
+    image: string;
+    location: string;
+    /** 0-100 identifiability of the export. */
+    confidence: number;
+    dispatch: string;
+  }) => void;
+  /** Tick off a beat of the core loop. No-op if already ticked. */
+  mark: (beat: string) => void;
 };
 
 const Ctx = createContext<Store | null>(null);
@@ -264,6 +385,7 @@ export function ViceProvider({ children }: { children: ReactNode }) {
             cash: saved.cash,
             completed: saved.completed,
             failed: saved.failed,
+            onboarded: saved.onboarded ?? false,
           },
         });
       } else {
@@ -289,6 +411,7 @@ export function ViceProvider({ children }: { children: ReactNode }) {
           cash: state.cash,
           completed: state.completed,
           failed: state.failed,
+          onboarded: state.onboarded,
         }),
       );
     } catch {
@@ -296,6 +419,7 @@ export function ViceProvider({ children }: { children: ReactNode }) {
     }
   }, [
     state.ready,
+    state.onboarded,
     state.alias,
     state.handle,
     state.heat,
@@ -406,6 +530,31 @@ export function ViceProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(t);
   }, [state.active, settle, toast]);
 
+  const logConsequence = useCallback<Store["logConsequence"]>((a) => {
+    const at = Date.now();
+    dispatch({
+      type: "radio",
+      line: { id: uid(), at, body: a.dispatch, onYou: true },
+    });
+    // Only a frame something can actually be matched against goes on file.
+    if (a.confidence >= 25) {
+      dispatch({
+        type: "record",
+        record: {
+          id: uid(),
+          image: a.image,
+          location: a.location,
+          confidence: Math.round(a.confidence),
+          at,
+        },
+      });
+    }
+  }, []);
+
+  const mark = useCallback((beat: string) => {
+    dispatch({ type: "beat", beat });
+  }, []);
+
   const value = useMemo<Store>(
     () => ({
       ...state,
@@ -417,8 +566,19 @@ export function ViceProvider({ children }: { children: ReactNode }) {
       abandon,
       refreshBoard,
       settleContract,
+      logConsequence,
+      mark,
     }),
-    [state, toast, accept, abandon, refreshBoard, settleContract],
+    [
+      state,
+      toast,
+      accept,
+      abandon,
+      refreshBoard,
+      settleContract,
+      logConsequence,
+      mark,
+    ],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

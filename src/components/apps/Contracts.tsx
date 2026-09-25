@@ -2,7 +2,7 @@
 
 import { useSyncExternalStore } from "react";
 import { money } from "@/lib/copy";
-import { rankFor, TIER_TINT, type Contract } from "@/lib/contracts";
+import { CATEGORY_NOTE, rankFor, TIER_TINT, type Contract } from "@/lib/contracts";
 import { useVice } from "@/lib/store";
 import { AppHeader, Btn, Tally } from "@/components/ui";
 
@@ -150,6 +150,28 @@ function Offer({
             {contract.fixer} · {contract.handle}
           </p>
         </div>
+      </div>
+
+      {/*
+        The two categories pull in opposite directions — this badge is the
+        fastest way to tell whether the job wants the photo buried or damning.
+      */}
+      <div
+        className="mt-2.5 flex items-center gap-2 rounded-lg border px-2 py-1.5"
+        style={{
+          borderColor: contract.category === "CLEANUP" ? "#9dff3d44" : "#ff3b3044",
+          background: contract.category === "CLEANUP" ? "#9dff3d0a" : "#ff3b300a",
+        }}
+      >
+        <span
+          className="font-mono text-[9px] font-bold tracking-[0.16em]"
+          style={{ color: contract.category === "CLEANUP" ? "#9dff3d" : "#ff3b30" }}
+        >
+          {contract.category}
+        </span>
+        <span className="font-mono text-[8px] tracking-[0.14em] text-white/40">
+          {CATEGORY_NOTE[contract.category]}
+        </span>
       </div>
 
       <p className="mt-2.5 text-[12px] leading-snug text-white/70">

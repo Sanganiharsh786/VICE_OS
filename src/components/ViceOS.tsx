@@ -5,6 +5,8 @@ import { renderScene } from "@/lib/art";
 import { BOOT_LINES, DISPATCH, money, pick } from "@/lib/copy";
 import { useVice } from "@/lib/store";
 import Backdrop from "@/components/Backdrop";
+import Onboarding from "@/components/Onboarding";
+import JudgeMode from "@/components/JudgeMode";
 import Vicegram from "@/components/apps/Vicegram";
 import MostWanted from "@/components/apps/MostWanted";
 import LeonidaID from "@/components/apps/LeonidaID";
@@ -81,7 +83,32 @@ export default function ViceOS() {
   const vice = useVice();
   const [screen, setScreen] = useState<Screen>("boot");
   const [wallpaper, setWallpaper] = useState<string | null>(null);
+  const [introDismissed, setIntroDismissed] = useState(false);
+  const [introReplay, setIntroReplay] = useState(false);
   const alarm = vice.starCount >= 4;
+
+  /*
+   * First visit gets the explainer, once the boot sequence is out of the way
+   * and localStorage has actually been read. Derived rather than pushed into
+   * state by an effect, so there is no extra render on load.
+   */
+  const intro =
+    introReplay ||
+    (!introDismissed && vice.ready && !vice.onboarded && screen !== "boot");
+
+  const closeIntro = (startJudge: boolean) => {
+    setIntroDismissed(true);
+    setIntroReplay(false);
+    vice.dispatch({ type: "onboarded" });
+    if (startJudge) vice.dispatch({ type: "judge", on: true });
+  };
+
+  // Beats the shell itself can see. The rest are reported by the apps.
+  useEffect(() => {
+    if (screen === "contracts") vice.mark("fixer");
+    if (screen === "wanted" && vice.posts.length > 0) vice.mark("wanted");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, vice.posts.length]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -105,10 +132,13 @@ export default function ViceOS() {
           alarm={alarm}
           hud={
             screen !== "boot" && screen !== "lock" ? (
-              <ContractHUD
-                active={screen === "contracts"}
-                onOpen={() => setScreen("contracts")}
-              />
+              <>
+                <JudgeMode onJump={(id) => setScreen(id as Screen)} />
+                <ContractHUD
+                  active={screen === "contracts"}
+                  onOpen={() => setScreen("contracts")}
+                />
+              </>
             ) : null
           }
         >
@@ -121,6 +151,7 @@ export default function ViceOS() {
               wallpaper={wallpaper}
               onOpen={(id) => setScreen(id)}
               onLock={() => setScreen("lock")}
+              onIntro={() => setIntroReplay(true)}
             />
           )}
           {screen === "vicegram" && <Vicegram onBack={() => setScreen("home")} />}
@@ -138,6 +169,7 @@ export default function ViceOS() {
           )}
 
           <Toasts />
+          {intro && <Onboarding onDone={() => closeIntro(true)} />}
         </Phone>
 
         <SidePanelRight />
@@ -380,12 +412,15 @@ function Home({
   wallpaper,
   onOpen,
   onLock,
+  onIntro,
 }: {
   wallpaper: string | null;
   onOpen: (id: Screen) => void;
   onLock: () => void;
+  onIntro: () => void;
 }) {
-  const { alias, handle, posts, bountyValue, starCount } = useVice();
+  const { alias, handle, posts, bountyValue, starCount, judge, dispatch } =
+    useVice();
   return (
     <div className="relative h-full">
       {wallpaper && (
@@ -421,8 +456,50 @@ function Home({
           </div>
         </div>
 
+        {/*
+          The fast path for somebody who has never seen this before: a guided
+          run down the whole loop, one action at a time.
+        */}
+        <button
+          onClick={() => dispatch({ type: "judge", on: !judge })}
+          className={`mt-3 flex w-full items-center gap-3 rounded-2xl border px-3 py-2.5 text-left transition ${
+            judge
+              ? "border-vice-lime bg-vice-lime/10"
+              : "border-vice-lime/40 bg-black/40 hover:border-vice-lime"
+          }`}
+        >
+          <span className="text-vice-lime">▶</span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[12px] font-bold tracking-wide text-vice-lime">
+              {judge ? "JUDGE MODE IS ON" : "PLAY THE GUIDED DEMO"}
+            </p>
+            <p className="font-mono text-[9px] tracking-[0.12em] text-white/40">
+              {judge
+                ? "follow the card under the status bar"
+                : "photo → forensics → edit → publish → consequences"}
+            </p>
+          </div>
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              onIntro();
+            }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.stopPropagation();
+                onIntro();
+              }
+            }}
+            className="shrink-0 rounded-full border border-white/15 px-2 py-0.5 font-mono text-[8px] tracking-[0.12em] text-white/40 transition hover:border-white/50 hover:text-white"
+          >
+            INTRO
+          </span>
+        </button>
+
         {/* apps */}
-        <div className="mt-5 grid grid-cols-2 gap-3">
+        <div className="mt-3 grid grid-cols-2 gap-3">
           {APPS.map((a) => (
             <button
               key={a.id}
@@ -562,24 +639,33 @@ function SidePanelLeft() {
           </li>
           <li>
             <span className="font-mono text-vice-cyan">02</span> Raise the phone and
-            shoot. The lens logs every face, plate and landmark it caught.
+            shoot. The lens records every face, plate and landmark it caught —
+            and the exact rectangle each one filled.
           </li>
           <li>
-            <span className="font-mono text-vice-pink">03</span> Edit it in the image
-            lab: crop, grade, draw, sticker over the incriminating parts.
+            <span className="font-mono text-vice-cyan">03</span>{" "}
+            <span className="text-vice-cyan">FORENSIC VISION</span> brackets them
+            and prices the frame before you ever open the editor.
           </li>
           <li>
-            <span className="font-mono text-vice-pink">04</span> Forensics diffs your
-            export against the original and prices what you left in.
+            <span className="font-mono text-vice-pink">04</span> Edit it in the image
+            lab: crop, grade, draw, sticker over the incriminating parts. The rail
+            re-reads those rectangles while you work.
           </li>
           <li>
-            <span className="font-mono text-vice-pink">05</span> Post it. Heat goes up,
-            bounty goes up, the poster prints itself.
+            <span className="font-mono text-vice-pink">05</span> Run forensics. Your
+            export is diffed against the original, subject by subject, and what
+            survived is what you pay for.
           </li>
           <li>
-            <span className="font-mono text-vice-sun">06</span> Or take a contract from{" "}
-            <span className="text-vice-sun">THE FIXER</span> — a timed job graded
-            purely on what the forensic scan finds in your export.
+            <span className="font-mono text-vice-pink">06</span> Post it. The radio
+            calls it in, the bulletin prints your own photo, and the street starts
+            crossing the road.
+          </li>
+          <li>
+            <span className="font-mono text-vice-sun">07</span> Or take a contract from{" "}
+            <span className="text-vice-sun">THE FIXER</span> — half of them want the
+            photo buried, half want it damning. Both are graded on the scan.
           </li>
         </ol>
       </Panel>

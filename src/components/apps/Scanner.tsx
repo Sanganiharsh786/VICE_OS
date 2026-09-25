@@ -5,35 +5,56 @@ import { DISPATCH, STATIONS, pick } from "@/lib/copy";
 import { uid, useVice } from "@/lib/store";
 import { AppHeader, Btn, HeatMeter } from "@/components/ui";
 
+type Line = { id: string; t: string; body: string; onYou?: boolean };
+
+const stamp = (at: number) =>
+  new Date(at).toLocaleTimeString("en-US", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
 export default function Scanner({ onBack }: { onBack: () => void }) {
   const vice = useVice();
   const [station, setStation] = useState(STATIONS[0].id);
-  const [log, setLog] = useState<{ id: string; t: string; body: string }[]>([]);
+  const [log, setLog] = useState<Line[]>([]);
   const [cooldown, setCooldown] = useState(0);
   const logRef = useRef<HTMLDivElement>(null);
+  const seen = useRef(new Set<string>());
 
   // Chatter rate tracks your heat — quiet when you're clean, relentless at 5 stars.
   useEffect(() => {
     const every = Math.max(2200, 9000 - vice.heat * 62);
     const t = setInterval(() => {
       setLog((l) =>
-        [
-          ...l,
-          {
-            id: uid(),
-            t: new Date().toLocaleTimeString("en-US", {
-              hour12: false,
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            }),
-            body: pick(DISPATCH),
-          },
-        ].slice(-24),
+        [...l, { id: uid(), t: stamp(Date.now()), body: pick(DISPATCH) }].slice(-24),
       );
     }, every);
     return () => clearInterval(t);
   }, [vice.heat]);
+
+  /*
+   * Lines the player's own posts put on the air. They arrive through the
+   * store rather than the random pool, so the radio is a genuine consequence
+   * of the last export rather than ambience.
+   */
+  useEffect(() => {
+    const fresh = vice.radio.filter((r) => !seen.current.has(r.id));
+    if (!fresh.length) return;
+    fresh.forEach((r) => seen.current.add(r.id));
+    setLog((l) =>
+      [
+        ...l,
+        ...fresh.map((r) => ({
+          id: r.id,
+          t: stamp(r.at),
+          body: r.body,
+          onYou: true,
+        })),
+      ].slice(-24),
+    );
+  }, [vice.radio]);
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
@@ -122,10 +143,19 @@ export default function Scanner({ onBack }: { onBack: () => void }) {
             <p className="font-mono text-[10px] text-white/30">…quiet out there…</p>
           )}
           {log.map((l) => (
-            <p key={l.id} className="rise-in font-mono text-[10px] leading-relaxed">
+            <p
+              key={l.id}
+              className={`rise-in font-mono text-[10px] leading-relaxed ${
+                l.onYou ? "my-1 border-l-2 border-vice-blood pl-2" : ""
+              }`}
+            >
               <span className="text-white/30">{l.t}</span>{" "}
-              <span className="text-vice-cyan">DISPATCH:</span>{" "}
-              <span className="text-white/65">{l.body}</span>
+              <span className={l.onYou ? "text-vice-blood" : "text-vice-cyan"}>
+                {l.onYou ? "ON YOUR POST:" : "DISPATCH:"}
+              </span>{" "}
+              <span className={l.onYou ? "text-white/85" : "text-white/65"}>
+                {l.body}
+              </span>
             </p>
           ))}
         </div>

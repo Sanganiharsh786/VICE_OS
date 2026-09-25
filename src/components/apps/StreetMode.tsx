@@ -7,12 +7,14 @@ import {
   type Quality,
   type Stats,
 } from "@/lib/three/engine";
+import { heatTier } from "@/lib/forensics";
+import { tintOf, type Evidence } from "@/lib/evidence";
 
 export type StreetPhoto = {
   src: string;
   title: string;
   location: string;
-  evidence: { kind: string; label: string }[];
+  evidence: Evidence[];
 };
 
 const EMPTY: Stats = {
@@ -23,12 +25,6 @@ const EMPTY: Stats = {
   fps: 60,
 };
 
-const KIND_TINT: Record<string, string> = {
-  FACE: "#ff2e97",
-  PLATE: "#22e6ff",
-  LANDMARK: "#ffb347",
-  CONTRABAND: "#ff3b30",
-};
 
 /**
  * The 3D half of the loop. You walk Leonida in third person, raise the phone,
@@ -266,6 +262,37 @@ export default function StreetMode({
         </div>
       </div>
 
+      {/*
+        Live brackets on whatever the lens can identify. These are the same
+        rectangles the shutter records and the forensic scan re-reads, so the
+        player can see the job before they take it.
+      */}
+      <div className="pointer-events-none absolute inset-0">
+        {stats.inFrame.map((e, i) =>
+          e.box ? (
+            <div
+              key={`${e.label}-${i}`}
+              className="absolute border transition-all duration-150"
+              style={{
+                left: `${e.box.x * 100}%`,
+                top: `${e.box.y * 100}%`,
+                width: `${e.box.w * 100}%`,
+                height: `${e.box.h * 100}%`,
+                borderColor: `${tintOf(e.kind)}bb`,
+                boxShadow: `0 0 12px -2px ${tintOf(e.kind)}`,
+              }}
+            >
+              <span
+                className="absolute -top-3.5 left-0 whitespace-nowrap font-mono text-[8px] tracking-[0.14em]"
+                style={{ color: tintOf(e.kind) }}
+              >
+                {e.label}
+              </span>
+            </div>
+          ) : null,
+        )}
+      </div>
+
       {/* what the lens can identify right now */}
       <div className="pointer-events-none absolute right-4 top-24 w-[190px] space-y-1.5">
         <p className="text-right font-mono text-[9px] tracking-[0.24em] text-white/40">
@@ -280,12 +307,21 @@ export default function StreetMode({
             <p
               key={e.label}
               className="text-right font-mono text-[10px] tracking-[0.1em]"
-              style={{ color: KIND_TINT[e.kind] ?? "#fff" }}
+              style={{ color: tintOf(e.kind) }}
             >
               {e.label}
             </p>
           ))
         )}
+        <p className="pt-2 text-right font-mono text-[9px] tracking-[0.2em] text-white/25">
+          THE CITY READS YOU AS
+        </p>
+        <p
+          className="text-right font-mono text-[10px] tracking-[0.16em]"
+          style={{ color: heat > 60 ? "#ff3b30" : heat > 20 ? "#ffb347" : "#9dff3d" }}
+        >
+          {heatTier(heat).name}
+        </p>
       </div>
 
       {/* bottom chrome */}
