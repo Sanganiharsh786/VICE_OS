@@ -294,11 +294,6 @@ export function buildCity(scene: THREE.Scene): City {
             float h = clamp(normalize(vP).y * 0.5 + 0.5, 0.0, 1.0);
             vec3 c = mix(low, mid, smoothstep(0.42, 0.62, h));
             c = mix(c, top, smoothstep(0.58, 0.95, h));
-            // sun bloom sitting on the horizon down the street
-            vec3 d = normalize(vP);
-            float sun = pow(max(dot(d, normalize(vec3(0.12, 0.06, -1.0))), 0.0), 220.0);
-            float halo = pow(max(dot(d, normalize(vec3(0.12, 0.06, -1.0))), 0.0), 8.0);
-            c += vec3(1.0, 0.72, 0.42) * (sun * 2.2 + halo * 0.35);
             gl_FragColor = vec4(c, 1.0);
           }
         `,
@@ -316,8 +311,10 @@ export function buildCity(scene: THREE.Scene): City {
     keep(
       new THREE.MeshStandardMaterial({
         map: keep(asphalt()),
-        roughness: 0.42,
-        metalness: 0.25,
+        // The road is one flat plane, so a low roughness turns each light into
+        // a single huge specular blob instead of a wet sheen. Keep it matte.
+        roughness: 0.78,
+        metalness: 0.08,
         color: 0xffffff,
       }),
     ),
@@ -643,14 +640,14 @@ export function buildCity(scene: THREE.Scene): City {
   }
 
   /* ---- lighting ---- */
-  // The sun sits on the horizon straight down the street, so the player is
-  // backlit by design. The hemisphere has to carry the road and the fill has
-  // to carry the character, or everything below eye level goes to pure black.
+  // Key light is offset to the side rather than straight down the street: a
+  // head-on sun blew the whole frame out and buried the HUD. The hemisphere
+  // carries the road and the fill carries the character.
   const hemi = new THREE.HemisphereLight(0xffa8d8, 0x4a3560, 1.9);
   group.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xffb178, 2.4);
-  sun.position.set(14, 16, -52);
+  const sun = new THREE.DirectionalLight(0xffb178, 1.5);
+  sun.position.set(34, 20, -26);
   sun.castShadow = true;
   sun.shadow.mapSize.set(1024, 1024);
   sun.shadow.camera.near = 1;
@@ -663,7 +660,7 @@ export function buildCity(scene: THREE.Scene): City {
   group.add(sun);
   group.add(sun.target);
 
-  const fill = new THREE.DirectionalLight(0x6fe6ff, 1.35);
+  const fill = new THREE.DirectionalLight(0x6fe6ff, 1.0);
   fill.position.set(-16, 9, 24);
   group.add(fill);
 

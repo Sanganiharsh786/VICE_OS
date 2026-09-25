@@ -174,7 +174,7 @@ export class StreetEngine {
     this.renderer.shadowMap.enabled = opts.quality === "high";
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.22;
+    this.renderer.toneMappingExposure = 1.02;
 
     this.camera = new THREE.PerspectiveCamera(this.fov, 1, 0.1, 500);
     this.scene.add(this.camera);
@@ -227,9 +227,9 @@ export class StreetEngine {
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(
       new THREE.Vector2(1, 1),
-      opts.quality === "high" ? 0.72 : 0.45,
+      opts.quality === "high" ? 0.42 : 0.28,
       0.7,
-      0.78,
+      0.9,
     );
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
