@@ -23,10 +23,19 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { createCharacter, paletteFor } from "./rig";
 import { Actor, type ActorInput } from "./locomotion";
-import { buildCity, resolveCollisions, type City, type EvidenceTag } from "./city";
+import {
+  buildCity,
+  resolveCollisions,
+  type City,
+  type EvidenceTag,
+  type TimeMode,
+} from "./city";
+import { LANDMARK_SPOTS, districtAt, placeName } from "./world/layout";
 import type { Evidence } from "../evidence";
 
 export type Quality = "high" | "low";
+
+export type CameraMode = "shoulder" | "wide" | "cinematic";
 
 export type Stats = {
   speed: number;
@@ -35,6 +44,19 @@ export type Stats = {
   /** Tagged subjects currently framed — drives the live viewfinder readout. */
   inFrame: Evidence[];
   fps: number;
+  /** Where in Leonida the player is standing. */
+  place: string;
+  district: string;
+  /** World position, for the minimap. */
+  x: number;
+  z: number;
+  /** Which way the camera faces, radians — rotates the minimap. */
+  camYaw: number;
+  /** 0..1 through the day. */
+  timeOfDay: number;
+  /** Whether the clock is running, or pinned to day / sunset / night. */
+  timeMode: TimeMode;
+  camera: CameraMode;
 };
 
 export type CaptureResult = {
@@ -48,6 +70,31 @@ const CAPTURE_W = 1080;
 const CAPTURE_H = 1350;
 
 const _head = new THREE.Vector3();
+const _ray = new THREE.Vector3();
+
+/**
+ * Third-person framings. `dist` is how far the lens sits behind the player,
+ * `focusY` how high it looks, `lift` how much it rides above the pivot.
+ */
+const CAMERA_MODES: Record<
+  CameraMode,
+  {
+    dist: number;
+    focusY: number;
+    shoulder: number;
+    lift: number;
+    fov: number;
+    speedPull: number;
+    maxPull: number;
+  }
+> = {
+  // close enough to read a face, far enough to see the far pavement
+  shoulder: { dist: 6.2, focusY: 1.5, shoulder: 0.5, lift: 0.9, fov: 60, speedPull: 0.3, maxPull: 2.2 },
+  // the default for actually looking at the city
+  wide: { dist: 10.5, focusY: 2.1, shoulder: 0.2, lift: 2.4, fov: 66, speedPull: 0.42, maxPull: 3.6 },
+  // up where you can see the skyline over the rooftops
+  cinematic: { dist: 17, focusY: 3.0, shoulder: 0, lift: 6.5, fov: 70, speedPull: 0.5, maxPull: 5 },
+};
 
 /** Grain + vignette + a touch of chromatic fringing, matching the 2D art. */
 const FilmShader = {
@@ -98,14 +145,22 @@ type Ped = {
   scared: number;
 };
 
-const SPOTS: { z: number; name: string }[] = [
-  { z: -60, name: "TOWER DISTRICT" },
-  { z: -20, name: "OCEAN DRIVE" },
-  { z: 20, name: "LITTLE HAVANA ROW" },
-  { z: 60, name: "SOUTH CAUSEWAY" },
-];
-
 const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+/** Keys the browser would otherwise use to scroll the page out from under us. */
+const NO_SCROLL = new Set([
+  "Space",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+]);
+
+/** Things the engine wants the UI to know about the moment they happen. */
+export type EngineEvent =
+  | { kind: "travel"; place: string }
+  | { kind: "camera"; camera: CameraMode }
+  | { kind: "time"; mode: TimeMode };
 
 export class StreetEngine {
   private renderer: THREE.WebGLRenderer;
@@ -118,7 +173,6 @@ export class StreetEngine {
   private player: Actor;
   private peds: Ped[] = [];
   private evidence: EvidenceTag[] = [];
-  private raycaster = new THREE.Raycaster();
 
   private keys = new Set<string>();
   private stick = { x: 0, y: 0 };
@@ -139,6 +193,11 @@ export class StreetEngine {
   private camPos = new THREE.Vector3();
   private camLook = new THREE.Vector3();
   private fov = 58;
+  private camMode: CameraMode = "shoulder";
+  /** Extra yaw from the keyboard turn keys, applied per frame. */
+  private turnKey = 0;
+  private travelIdx = 0;
+  private onEvent: (e: EngineEvent) => void = () => {};
 
   private raf = 0;
   private last = 0;
@@ -176,10 +235,13 @@ export class StreetEngine {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.02;
 
-    this.camera = new THREE.PerspectiveCamera(this.fov, 1, 0.1, 500);
+    // The far plane has to clear the skyline ring and the sky dome, three and
+    // four kilometres out — this is what lets the city read as continuing past
+    // the playable grid instead of ending at a wall of fog.
+    this.camera = new THREE.PerspectiveCamera(this.fov, 1, 0.2, 9000);
     this.scene.add(this.camera);
 
-    this.city = buildCity(this.scene);
+    this.city = buildCity(this.scene, opts.quality);
     this.evidence = [...this.city.evidence];
 
     /* ---- the player ---- */
@@ -190,9 +252,15 @@ export class StreetEngine {
     });
     this.scene.add(hero.group);
     this.player = new Actor(hero);
-    this.player.teleport(4.2, 18, Math.PI);
+    this.player.teleport(this.city.spawn.x, this.city.spawn.z, this.city.spawn.yaw);
+    this.camYaw = this.city.spawn.yaw;
 
-    /* ---- the crowd ---- */
+    /*
+     * The rigged crowd. These are the expensive ones — skinned meshes running
+     * the full IK gait solve — so there are only a handful and they are kept
+     * near the player, where the lens can actually identify a face. Density
+     * everywhere else is the instanced crowd inside the city.
+     */
     const count = opts.quality === "high" ? 7 : 4;
     for (let i = 0; i < count; i++) {
       const c = createCharacter({
@@ -203,9 +271,7 @@ export class StreetEngine {
       });
       this.scene.add(c.group);
       const a = new Actor(c);
-      const w = this.city.waypoints[
-        Math.floor(Math.random() * this.city.waypoints.length)
-      ];
+      const w = this.pickWaypoint(true);
       a.teleport(w.x, w.z, Math.random() * 7);
       this.peds.push({
         actor: a,
@@ -326,14 +392,110 @@ export class StreetEngine {
 
   /* ---------------- input plumbing ---------------- */
 
+  /**
+   * Full keyboard. Everything the mouse can do has a key, because on a laptop
+   * trackpad the drag-look is the worst part of the experience and the turn
+   * keys let you play without ever touching it.
+   *
+   *   W A S D / arrows  walk          Shift  sprint      Space  jump
+   *   Q E               turn camera   R F    look up/down
+   *   C                 camera mode   F      raise the phone
+   *   T                 fast travel   1-9    jump to a landmark
+   *   [ ]               scrub time    N      flip day / night
+   *   X                 back to spawn
+   */
   private onKeyDown = (e: KeyboardEvent) => {
-    if (e.code === "Space") e.preventDefault();
+    // don't steal keys from the editor, the caption box or anything focused
+    const el = document.activeElement;
+    if (
+      el &&
+      (el.tagName === "INPUT" ||
+        el.tagName === "TEXTAREA" ||
+        (el as HTMLElement).isContentEditable)
+    )
+      return;
+
+    if (NO_SCROLL.has(e.code)) e.preventDefault();
+    if (e.repeat) return;
     this.keys.add(e.code);
+
+    /*
+     * Movement is matched on `code`, because WASD is a shape on the keyboard
+     * rather than four letters — it has to stay in the same place on AZERTY.
+     * The action keys below match either, so they still work on a layout where
+     * the physical KeyH is somewhere else entirely.
+     */
+    const ch = e.key.length === 1 ? e.key.toLowerCase() : "";
+    const is = (code: string, letter: string) => e.code === code || ch === letter;
+
     if (e.code === "Space") this.wantJump = true;
-    if (e.code === "KeyF") this.aiming = !this.aiming;
+    else if (is("KeyF", "f")) this.aiming = !this.aiming;
+    else if (is("KeyC", "c")) this.cycleCameraMode();
+    else if (is("KeyT", "t")) {
+      this.travelIdx = (this.travelIdx + 1) % LANDMARK_SPOTS.length;
+      this.travelTo(this.travelIdx);
+    } else if (is("KeyN", "n")) {
+      this.onEvent({ kind: "time", mode: this.city.cycleTimeMode() });
+    } else if (is("KeyX", "x")) {
+      this.player.teleport(
+        this.city.spawn.x,
+        this.city.spawn.z,
+        this.city.spawn.yaw,
+      );
+      this.camYaw = this.city.spawn.yaw;
+      this.snapCamera();
+    } else if (is("BracketLeft", "[") || is("BracketRight", "]")) {
+      // scrubbing by hand implies you want the clock to stop moving under you
+      if (this.city.timeMode === "auto") this.city.setTimeMode("sunset");
+      this.city.setTimeOfDay(
+        this.city.timeOfDay + (e.code === "BracketLeft" || ch === "[" ? -0.03 : 0.03),
+      );
+    } else if (/^[1-9]$/.test(ch)) {
+      this.travelIdx = Number(ch) - 1;
+      this.travelTo(this.travelIdx);
+    }
   };
 
   private onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code);
+
+  cycleCameraMode() {
+    const order: CameraMode[] = ["shoulder", "wide", "cinematic"];
+    this.camMode = order[(order.indexOf(this.camMode) + 1) % order.length];
+    this.onEvent({ kind: "camera", camera: this.camMode });
+    return this.camMode;
+  }
+
+  /** Drops the player at a named place. A kilometre of city needs this. */
+  travelTo(n: number) {
+    const spot = LANDMARK_SPOTS[((n % LANDMARK_SPOTS.length) + LANDMARK_SPOTS.length) % LANDMARK_SPOTS.length];
+    if (!spot) return;
+    this.travelIdx = LANDMARK_SPOTS.indexOf(spot);
+    this.player.teleport(spot.x, spot.z, this.camYaw);
+    resolveCollisions(this.player.pos, 0.36, this.city.grid);
+    // pull the rigged crowd along so the new district isn't deserted
+    for (const ped of this.peds) {
+      const w = this.pickWaypoint(true);
+      ped.actor.teleport(w.x, w.z, Math.random() * 7);
+      ped.target = this.pickWaypoint();
+    }
+    this.snapCamera();
+    this.onEvent({ kind: "travel", place: spot.name });
+  }
+
+  setEventSink(fn: (e: EngineEvent) => void) {
+    this.onEvent = fn;
+  }
+
+  setCamera(mode: CameraMode) {
+    this.camMode = mode;
+  }
+
+  /** Steps the lighting: auto -> day -> sunset -> night. */
+  cycleTimeMode() {
+    const mode = this.city.cycleTimeMode();
+    this.onEvent({ kind: "time", mode });
+    return mode;
+  }
 
   /**
    * Pointer lock is the good experience, but it is refused outright in
@@ -404,12 +566,27 @@ export class StreetEngine {
 
   /* ---------------- simulation ---------------- */
 
-  private pickWaypoint() {
+  /**
+   * A pavement node, biased to the player's neighbourhood. The walk graph
+   * spans the whole kilometre of city, so an unbiased pick would scatter the
+   * seven expensive rigged pedestrians across districts the player will never
+   * visit.
+   */
+  private pickWaypoint(close = false) {
     const w = this.city.waypoints;
+    const p = this.player?.pos;
+    const max = close ? 55 : 95;
+    if (p) {
+      for (let t = 0; t < 40; t++) {
+        const n = w[Math.floor(Math.random() * w.length)];
+        const d = Math.hypot(n.x - p.x, n.z - p.z);
+        if (d > 6 && d < max) return n.clone();
+      }
+    }
     return w[Math.floor(Math.random() * w.length)].clone();
   }
 
-  private playerInput(): ActorInput {
+  private playerInput(dt: number): ActorInput {
     const k = this.keys;
     let ix = this.stick.x;
     let iz = this.stick.y;
@@ -418,14 +595,32 @@ export class StreetEngine {
     if (k.has("KeyA") || k.has("ArrowLeft")) ix -= 1;
     if (k.has("KeyD") || k.has("ArrowRight")) ix += 1;
 
-    // Stick is in camera space — pushing "up" means away from the camera.
+    // keyboard look, for anyone who never wants to drag the mouse
+    this.turnKey = 0;
+    if (k.has("KeyQ")) this.turnKey += 1;
+    if (k.has("KeyE")) this.turnKey -= 1;
+    if (this.turnKey) this.camYaw += this.turnKey * 2.1 * dt;
+    if (k.has("KeyR") || k.has("KeyV")) {
+      const s = k.has("KeyR") ? -1 : 1;
+      this.camPitch = Math.max(-0.6, Math.min(0.9, this.camPitch + s * 1.2 * dt));
+    }
+
+    /*
+     * Camera-relative movement.
+     *
+     * The camera looks along F = (sin(camYaw), cos(camYaw)), so its right-hand
+     * vector — the screen-right direction — is F x up = (-cos, sin). This used
+     * to be written as (+cos, -sin), which is the same axis pointing the wrong
+     * way: A and D, and the left and right arrows, drove the player in the
+     * opposite direction to the one the key says. Both sign flips below are
+     * that fix.
+     */
     const sin = Math.sin(this.camYaw);
     const cos = Math.cos(this.camYaw);
-    const moveX = ix * cos - iz * sin;
-    const moveZ = -ix * sin - iz * cos;
+    const moveX = -ix * cos - iz * sin;
+    const moveZ = ix * sin - iz * cos;
 
-    const run =
-      this.running || k.has("ShiftLeft") || k.has("ShiftRight");
+    const run = this.running || k.has("ShiftLeft") || k.has("ShiftRight");
     const jump = this.wantJump;
     this.wantJump = false;
 
@@ -454,6 +649,16 @@ export class StreetEngine {
           ped.target = this.pickWaypoint();
           ped.wait = 0.6 + Math.random() * 3.4;
         }
+      }
+
+      // The city is a kilometre across and these seven are the only rigged
+      // faces in it, so they get re-homed rather than left behind.
+      if (Math.hypot(p.x - a.pos.x, p.z - a.pos.z) > 130) {
+        const w = this.pickWaypoint(true);
+        a.teleport(w.x, w.z, Math.random() * 7);
+        ped.target = this.pickWaypoint();
+        ped.scared = 0;
+        continue;
       }
 
       // At high heat, anyone who gets close breaks away from you.
@@ -489,7 +694,7 @@ export class StreetEngine {
             ? p
             : null,
       });
-      resolveCollisions(a.pos, 0.32, this.city.colliders);
+      resolveCollisions(a.pos, 0.32, this.city.grid);
     }
   }
 
@@ -526,36 +731,61 @@ export class StreetEngine {
         this.player.pos.y + this.player.char.dims.hipY + 0.58,
         this.player.pos.z + cos * 0.22,
       );
+      /*
+       * The phone flattens whatever pitch the third-person camera was holding.
+       * That camera rides above the player and therefore looks slightly down;
+       * carrying that angle into the viewfinder put three quarters of tarmac
+       * in every 4:5 photo, which is not what anyone frames.
+       */
+      const aimPitch = this.camPitch * 0.4 - 0.02;
       focus
         .copy(want)
         .add(
           new THREE.Vector3(
-            sin * cp,
-            -Math.sin(this.camPitch),
-            cos * cp,
+            sin * Math.cos(aimPitch),
+            -Math.sin(aimPitch),
+            cos * Math.cos(aimPitch),
           ).multiplyScalar(12),
         );
     } else {
-      const dist = 4.3 + Math.min(this.player.currentSpeed * 0.16, 1.1);
+      /*
+       * Camera framing is what decides whether a city reads as big. The old
+       * rig sat 4.3m behind the player's shoulder at head height, which put a
+       * wall of building across the top of the frame and cropped the street
+       * off at twenty metres — the single biggest reason the old block felt
+       * like a corridor. Every mode here is further back and higher, and the
+       * shoulder offset is small enough that the player isn't in the way.
+       */
+      const m = CAMERA_MODES[this.camMode];
+      const dist =
+        m.dist + Math.min(this.player.currentSpeed * m.speedPull, m.maxPull);
       focus.set(
-        this.player.pos.x + cos * 0.34,
-        this.player.pos.y + 1.28,
-        this.player.pos.z - sin * 0.34,
+        this.player.pos.x + cos * m.shoulder,
+        this.player.pos.y + m.focusY,
+        this.player.pos.z - sin * m.shoulder,
       );
       want.set(
         focus.x - sin * dist * cp,
-        focus.y + Math.sin(this.camPitch) * dist + 0.35,
+        focus.y + Math.sin(this.camPitch) * dist + m.lift,
         focus.z - cos * dist * cp,
       );
 
-      // don't let the camera swing through a building
-      const ray = want.clone().sub(focus).normalize();
-      this.raycaster.set(focus, ray);
-      this.raycaster.far = focus.distanceTo(want);
-      const hits = this.raycaster.intersectObject(this.city.group, true);
-      if (hits.length && hits[0].distance < this.raycaster.far) {
-        want.copy(focus).addScaledVector(ray, Math.max(0.6, hits[0].distance - 0.3));
+      /*
+       * Keep the camera out of the walls. This used to be a full-scene
+       * raycast, which at forty objects was fine and at four thousand was the
+       * most expensive thing in the frame — it is now a slab test against the
+       * collision grid, which touches maybe a dozen boxes.
+       */
+      const reach = focus.distanceTo(want);
+      const hit = this.city.rayHit(focus, want);
+      if (hit >= 0 && hit < reach) {
+        // the direction has to be taken before `want` is overwritten — doing it
+        // inline collapses the camera onto its own look target
+        _ray.copy(want).sub(focus).normalize();
+        want.copy(focus).addScaledVector(_ray, Math.max(1.4, hit - 0.35));
       }
+      // never let the lens end up under the pavement
+      want.y = Math.max(want.y, this.player.pos.y + 0.7);
     }
 
     const k = 1 - Math.exp(-(aim ? 16 : 9) * dt);
@@ -572,7 +802,10 @@ export class StreetEngine {
         _head.set(this.player.pos.x, head, this.player.pos.z),
       ) > 1.15;
 
-    const wantFov = aim ? 46 : 56 + Math.min(this.player.currentSpeed * 2.1, 12);
+    const wantFov = aim
+      ? 46
+      : CAMERA_MODES[this.camMode].fov +
+        Math.min(this.player.currentSpeed * 2.1, 12);
     this.fov += (wantFov - this.fov) * (1 - Math.exp(-7 * dt));
     this.camera.fov = this.fov;
     this.camera.updateProjectionMatrix();
@@ -587,11 +820,21 @@ export class StreetEngine {
     this.elapsed += dt;
     this.fpsAvg = this.fpsAvg * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
 
-    this.player.update(dt, this.playerInput());
-    resolveCollisions(this.player.pos, 0.36, this.city.colliders);
+    this.player.update(dt, this.playerInput(dt));
+    /*
+     * Walls first, then vehicles, then walls again — so a bus that has pulled
+     * up against you can't shove you through a shopfront.
+     */
+    resolveCollisions(this.player.pos, 0.36, this.city.grid);
+    this.city.resolveVehicles(this.player.pos, 0.36);
+    resolveCollisions(this.player.pos, 0.36, this.city.grid);
     this.stepCrowd(dt);
     this.updateCamera(dt);
-    this.city.update(this.elapsed);
+    this.city.update(dt, this.elapsed, {
+      x: this.player.pos.x,
+      z: this.player.pos.z,
+      heat: this.heat,
+    });
 
     // The wanted-level strobe is the one genuinely flashing thing in here, so
     // it goes away entirely for anyone who asked for reduced motion.
@@ -609,12 +852,21 @@ export class StreetEngine {
 
     this.composer.render();
 
+    const p = this.player.pos;
     this.onStats({
       speed: this.player.currentSpeed,
       heading: this.headingLabel(),
       aiming: this.aiming,
       inFrame: this.framed(this.camera, 0.86),
       fps: this.fpsAvg,
+      place: placeName(p.x, p.z),
+      district: districtAt(p.x, p.z).name,
+      x: p.x,
+      z: p.z,
+      camYaw: this.camYaw,
+      timeOfDay: this.city.timeOfDay,
+      timeMode: this.city.timeMode,
+      camera: this.camMode,
     });
   }
 
@@ -624,11 +876,7 @@ export class StreetEngine {
   }
 
   private locationLabel() {
-    let best = SPOTS[0];
-    for (const s of SPOTS)
-      if (Math.abs(s.z - this.player.pos.z) < Math.abs(best.z - this.player.pos.z))
-        best = s;
-    return best.name;
+    return placeName(this.player.pos.x, this.player.pos.z);
   }
 
   /**
@@ -638,7 +886,6 @@ export class StreetEngine {
   private framed(cam: THREE.PerspectiveCamera, edge = 1): Evidence[] {
     const out: Evidence[] = [];
     const p = new THREE.Vector3();
-    const dir = new THREE.Vector3();
     const right = new THREE.Vector3();
     const up = new THREE.Vector3();
     cam.updateMatrixWorld();
@@ -655,13 +902,9 @@ export class StreetEngine {
       // too small in frame to identify anything
       if (tag.radius / d < 0.0035) continue;
 
-      dir.subVectors(p, cam.position).normalize();
-      this.raycaster.set(cam.position, dir);
-      this.raycaster.far = d - tag.radius;
-      if (this.raycaster.far > 0.2) {
-        const blocked = this.raycaster.intersectObject(this.city.group, true);
-        if (blocked.length) continue;
-      }
+      // Is anything standing in the way? Same slab test the camera uses —
+      // a full-scene raycast per tag per frame is not affordable at this scale.
+      if (d - tag.radius > 0.4 && this.city.blocked(cam.position, p)) continue;
 
       /*
        * Screen-space footprint of the detail, measured by projecting a point

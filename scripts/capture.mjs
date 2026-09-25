@@ -49,6 +49,18 @@ async function clickText(page, text, { exact = false } = {}) {
   return hit;
 }
 
+/** Clicks the first element matching a CSS selector. */
+async function clickSelector(page, selector) {
+  const hit = await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    el.click();
+    return true;
+  }, selector);
+  if (!hit) console.warn(`    · nothing matching "${selector}"`);
+  return hit;
+}
+
 async function shot(page, name) {
   await page.screenshot({
     path: `${OUT}/${name}.jpg`,
@@ -121,21 +133,31 @@ async function main() {
   /* 02 — LEONIDA LIVE: the 3D block, then the phone up, then the shutter */
   console.log("· leonida live");
   if (await clickText(page, "leonida live")) {
-    await wait(9000); // engine boot, city build, first frames
-    await shot(page, "street");
+    // engine boot, then the world build: a square kilometre of city is welded
+    // into its merged buffers before the first frame
+    await wait(16_000);
 
-    // Walk a little so the shot isn't the spawn pose.
+    // Downtown, pulled-back camera, walked forward off the junction — the
+    // avenue is the frame that shows what the city actually is.
+    await page.keyboard.press("Digit2");
+    await wait(600);
+    await page.keyboard.press("KeyC");
+    await wait(400);
     await page.keyboard.down("KeyW");
-    await wait(2200);
+    await wait(2600);
     await page.keyboard.up("KeyW");
-    await wait(900);
+    await wait(1200);
+    await shot(page, "street");
 
     await clickText(page, "raise phone");
     await wait(2200);
     await shot(page, "viewfinder");
 
     await clickText(page, "shoot");
-    await wait(5000);
+    await wait(4000);
+    // shots land on the film roll now; opening one is what enters the lab
+    await clickSelector(page, "[data-roll-shot]");
+    await wait(4000);
     await shot(page, "forensic-vision"); // brackets + prices, pre-editor
 
     /* 03 — the Image Lab, opened on a frame that carries evidence */

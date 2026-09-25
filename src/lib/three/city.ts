@@ -1,243 +1,209 @@
 /**
- * The block.
+ * Leonida.
  *
- * Same rule as the rest of VICE OS: no downloaded assets. Every texture here
- * is painted into a canvas at boot (asphalt, window grids, neon signage,
- * plates), and every mesh is generated from parameters.
+ * This file used to be the block — one straight street, forty buildings, a
+ * point light behind every neon sign. It is now the assembler for a city about
+ * a kilometre square: twelve districts on a road grid, a working signalised
+ * traffic network, a coastline with a harbour and a marina, six landmarks you
+ * can navigate by, and a skyline ring that removes the map edge.
  *
- * The world also publishes an *evidence register* — the faces, plates and
- * landmarks that can incriminate you if they end up in a photo. That register
- * is what connects the 3D scene to the image editor: whatever the shutter
- * catches is what you then have to deal with in the Image Lab.
+ * Everything is still generated at runtime from numbers and canvas paint —
+ * that house rule has not changed — but the scale forced three architectural
+ * changes, and they are the reason it runs at all:
+ *
+ *  - static geometry is welded into merged buffers by material, so ~1500
+ *    buildings and a few thousand props are a couple of dozen draw calls
+ *  - there are no per-object lights. Lit windows, signage and lamp spill are
+ *    emissive geometry and additive ground pools, lit by bloom
+ *  - collision and line-of-sight go through a uniform grid instead of a linear
+ *    scan and a full-scene raycast
+ *
+ * The evidence register is unchanged in spirit and much longer in practice:
+ * faces, plates and landmarks that will incriminate you if the shutter catches
+ * them, handed straight to the Image Lab.
  */
 
 import * as THREE from "three";
+import { MeshBank } from "./world/builder";
+import { CollisionGrid, type Collider } from "./world/collision";
+import { buildTextures } from "./world/textures";
+import { buildMaterials } from "./world/materials";
+import { buildRoadNet, buildRoads, type RoadNet } from "./world/roads";
+import { buildCell, type WorldCtx } from "./world/blocks";
+import {
+  boatRoutes,
+  buildCoast,
+  buildHarbour,
+  buildMarina,
+  buildOcean,
+} from "./world/water";
+import { buildLandmarks } from "./world/landmarks";
+import { buildSkyline } from "./world/skyline";
+import { Traffic, type SignalHead } from "./world/traffic";
+import { Boats, Crowd } from "./world/crowd";
+import { EXTENT, GRID, LANDMARK_SPOTS } from "./world/layout";
+import { mulberry } from "./world/rng";
+import type { EvidenceTag } from "./world/types";
 
-export type EvidenceKind = "FACE" | "PLATE" | "LANDMARK" | "CONTRABAND";
+export type { EvidenceTag, EvidenceKind } from "./world/types";
+export type { Collider } from "./world/collision";
+export { LANDMARK_SPOTS, placeName, districtAt } from "./world/layout";
 
-export type EvidenceTag = {
-  kind: EvidenceKind;
-  label: string;
-  /** Followed each frame for moving subjects (pedestrians). */
-  object: THREE.Object3D;
-  /** Local offset from the object's origin to the incriminating detail. */
-  offset: THREE.Vector3;
-  /** Roughly how big the detail is, for the in-frame test. */
-  radius: number;
-};
-
-export type Collider = {
-  minX: number;
-  maxX: number;
-  minZ: number;
-  maxZ: number;
-};
+export type CityQuality = "high" | "low";
 
 export type City = {
   group: THREE.Group;
-  colliders: Collider[];
+  grid: CollisionGrid;
   evidence: EvidenceTag[];
-  /** Sidewalk waypoints the pedestrian AI walks between. */
+  /** Pavement nodes the rigged pedestrians navigate by. */
   waypoints: THREE.Vector3[];
   sun: THREE.DirectionalLight;
-  update: (t: number) => void;
+  /** Where the player starts: the seafront, looking into the city. */
+  spawn: { x: number; z: number; yaw: number };
+  /** 0..1 through the day. Sunset is the look the city is designed around. */
+  timeOfDay: number;
+  setTimeOfDay: (t: number) => void;
+  /** Pinned lighting, or "auto" to let the clock run. */
+  timeMode: TimeMode;
+  setTimeMode: (mode: TimeMode) => TimeMode;
+  cycleTimeMode: () => TimeMode;
+  /** 0 = broad daylight, 1 = full night. Drives headlights and neon. */
+  nightness: number;
+  update: (
+    dt: number,
+    t: number,
+    opts: { x: number; z: number; heat: number },
+  ) => void;
+  /** True if a building stands between these two points. */
+  blocked: (from: THREE.Vector3, to: THREE.Vector3) => boolean;
+  /** Distance to the first wall along a segment, or -1. */
+  rayHit: (from: THREE.Vector3, to: THREE.Vector3) => number;
+  /** Pushes an actor out of any moving vehicle it is standing inside. */
+  resolveVehicles: (pos: THREE.Vector3, radius: number) => void;
+  stats: { buildings: number; colliders: number; draws: number };
   dispose: () => void;
 };
 
-const ROAD_HALF = 7;
-const WALK_HALF = 11.4;
-const BLOCK_LEN = 78;
+export const CITY_BOUNDS = { extent: EXTENT };
 
 /* ------------------------------------------------------------------ */
-/* canvas textures                                                     */
+/* sky                                                                 */
 /* ------------------------------------------------------------------ */
 
-function texture(
-  w: number,
-  h: number,
-  draw: (c: CanvasRenderingContext2D) => void,
-  repeat?: [number, number],
-) {
-  const cv = document.createElement("canvas");
-  cv.width = w;
-  cv.height = h;
-  const ctx = cv.getContext("2d")!;
-  draw(ctx);
-  const t = new THREE.CanvasTexture(cv);
-  t.colorSpace = THREE.SRGBColorSpace;
-  if (repeat) {
-    t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.repeat.set(repeat[0], repeat[1]);
-  }
-  t.anisotropy = 8;
-  return t;
-}
-
-function grain(ctx: CanvasRenderingContext2D, w: number, h: number, amt: number) {
-  const img = ctx.getImageData(0, 0, w, h);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const n = (Math.random() - 0.5) * amt;
-    d[i] += n;
-    d[i + 1] += n;
-    d[i + 2] += n;
-  }
-  ctx.putImageData(img, 0, 0);
-}
-
-function asphalt() {
-  return texture(
-    512,
-    512,
-    (c) => {
-      c.fillStyle = "#2b2736";
-      c.fillRect(0, 0, 512, 512);
-      for (let i = 0; i < 700; i++) {
-        c.fillStyle = `rgba(255,255,255,${Math.random() * 0.07})`;
-        const r = Math.random() * 3 + 0.5;
-        c.beginPath();
-        c.arc(Math.random() * 512, Math.random() * 512, r, 0, 7);
-        c.fill();
-      }
-      // oil bloom
-      for (let i = 0; i < 6; i++) {
-        const g = c.createRadialGradient(
-          Math.random() * 512,
-          Math.random() * 512,
-          2,
-          256,
-          256,
-          70,
-        );
-        g.addColorStop(0, "rgba(0,0,0,0.35)");
-        g.addColorStop(1, "rgba(0,0,0,0)");
-        c.fillStyle = g;
-        c.fillRect(0, 0, 512, 512);
-      }
-      grain(c, 512, 512, 22);
+function buildSky() {
+  const geo = new THREE.SphereGeometry(4200, 40, 24);
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    uniforms: {
+      sunDir: { value: new THREE.Vector3(0.6, 0.2, -0.7) },
+      zenith: { value: new THREE.Color("#140a32") },
+      horizon: { value: new THREE.Color("#6d1d63") },
+      ground: { value: new THREE.Color("#ff8a4c") },
+      night: { value: 1 },
     },
-    [8, 34],
-  );
-}
-
-function roadLine() {
-  return texture(
-    64,
-    512,
-    (c) => {
-      c.fillStyle = "rgba(0,0,0,0)";
-      c.clearRect(0, 0, 64, 512);
-      c.fillStyle = "#e8e3c8";
-      for (let y = 0; y < 512; y += 128) c.fillRect(22, y, 20, 74);
-    },
-    [1, 26],
-  );
-}
-
-function sidewalk() {
-  return texture(
-    256,
-    256,
-    (c) => {
-      c.fillStyle = "#454055";
-      c.fillRect(0, 0, 256, 256);
-      c.strokeStyle = "rgba(0,0,0,0.5)";
-      c.lineWidth = 3;
-      for (let i = 0; i <= 256; i += 64) {
-        c.beginPath();
-        c.moveTo(i, 0);
-        c.lineTo(i, 256);
-        c.moveTo(0, i);
-        c.lineTo(256, i);
-        c.stroke();
+    vertexShader: /* glsl */ `
+      varying vec3 vDir;
+      void main(){
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
-      grain(c, 256, 256, 26);
-    },
-    [3, 16],
-  );
-}
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 sunDir; uniform vec3 zenith; uniform vec3 horizon; uniform vec3 ground;
+      uniform float night;
+      varying vec3 vDir;
 
-const WINDOW_HUES = ["#ffb347", "#22e6ff", "#ff2e97", "#9dff3d", "#ffe9a8"];
+      float hash(vec3 p){
+        p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+      }
 
-function facade(seed: number) {
-  const rnd = mulberry(seed);
-  return texture(256, 512, (c) => {
-    const base = ["#1a1330", "#151226", "#221838", "#12161f"][
-      Math.floor(rnd() * 4)
-    ];
-    c.fillStyle = base;
-    c.fillRect(0, 0, 256, 512);
+      void main(){
+        vec3 d = normalize(vDir);
+        float h = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
 
-    const cols = 6;
-    const rows = 16;
-    const pw = 256 / cols;
-    const ph = 512 / rows;
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        const lit = rnd() > 0.52;
-        if (!lit) {
-          c.fillStyle = "rgba(0,0,0,0.55)";
-          c.fillRect(x * pw + 6, y * ph + 6, pw - 12, ph - 14);
-          continue;
+        vec3 col = mix(ground, horizon, smoothstep(0.40, 0.56, h));
+        col = mix(col, zenith, smoothstep(0.52, 0.95, h));
+
+        // the sun, and the glow it throws along the horizon behind it
+        float sd = max(dot(d, normalize(sunDir)), 0.0);
+        col += horizon * pow(sd, 6.0) * 0.55;
+        col += vec3(1.0, 0.82, 0.55) * pow(sd, 260.0) * 2.6;
+
+        // stars, fading in with the night and cut off below the horizon
+        if (night > 0.02 && d.y > -0.02) {
+          float s = hash(floor(d * 320.0));
+          float star = smoothstep(0.9975, 1.0, s) * smoothstep(0.0, 0.25, d.y);
+          col += vec3(0.85, 0.9, 1.0) * star * night * 2.2;
         }
-        const hue = WINDOW_HUES[Math.floor(rnd() * WINDOW_HUES.length)];
-        c.fillStyle = hue;
-        c.globalAlpha = 0.5 + rnd() * 0.5;
-        c.fillRect(x * pw + 6, y * ph + 6, pw - 12, ph - 14);
-        c.globalAlpha = 1;
+        gl_FragColor = vec4(col, 1.0);
       }
+    `,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -3;
+  return { mesh, mat, geo };
+}
+
+/**
+ * Keyframes for the sky, sun, fog and how lit the city's windows are.
+ *
+ * `fd` is the exponential fog density, and it is lowest at night on purpose.
+ * Night air is clearer than daytime haze, and dark fog does nothing except
+ * flatten the city into grey — the thing you actually want to see after dark is
+ * the neon two blocks away, which needs the air to be clear to reach you.
+ */
+const PALETTE = [
+  // [tod, zenith, horizon, ground, sunColour, sunIntensity, hemi, fog, fogDensity, nightness]
+  { t: 0.0, zen: "#040611", hor: "#120a2e", gnd: "#241344", sun: "#3a4a8a", si: 0.2, hemi: 0.62, fog: "#0d0a22", fd: 0.00055, night: 1 },
+  { t: 0.22, zen: "#0d1636", hor: "#5a2a5e", gnd: "#d86a4a", sun: "#ff9a5c", si: 0.7, hemi: 1.3, fog: "#3a1c40", fd: 0.00085, night: 0.6 },
+  { t: 0.30, zen: "#2a4e8c", hor: "#8fb8d8", gnd: "#ffd8a8", sun: "#ffd2a0", si: 1.9, hemi: 2.5, fog: "#9fc0d8", fd: 0.0013, night: 0.12 },
+  { t: 0.5, zen: "#1f5fbf", hor: "#8ec8ea", gnd: "#d8eaf5", sun: "#fff4e0", si: 2.5, hemi: 3.0, fog: "#adceE2", fd: 0.0014, night: 0 },
+  { t: 0.70, zen: "#2a4e8c", hor: "#c88a6a", gnd: "#ffc07a", sun: "#ffc490", si: 1.7, hemi: 2.3, fog: "#b08fa4", fd: 0.0013, night: 0.1 },
+  { t: 0.80, zen: "#140a32", hor: "#6d1d63", gnd: "#ff8a4c", sun: "#ffb178", si: 1.0, hemi: 1.45, fog: "#4a1852", fd: 0.001, night: 0.55 },
+  { t: 0.88, zen: "#0a0724", hor: "#3a1550", gnd: "#a8386a", sun: "#8a5a9a", si: 0.34, hemi: 0.82, fog: "#22103a", fd: 0.0007, night: 0.9 },
+  { t: 1.0, zen: "#040611", hor: "#120a2e", gnd: "#241344", sun: "#3a4a8a", si: 0.2, hemi: 0.62, fog: "#0d0a22", fd: 0.00055, night: 1 },
+];
+
+/** The fixed times the player can pin the world to, plus the running clock. */
+export const TIME_MODES = ["auto", "day", "sunset", "night"] as const;
+export type TimeMode = (typeof TIME_MODES)[number];
+
+const MODE_TIME: Record<Exclude<TimeMode, "auto">, number> = {
+  day: 0.46,
+  sunset: 0.79,
+  night: 0.9,
+};
+
+function samplePalette(t: number) {
+  const tod = ((t % 1) + 1) % 1;
+  let a = PALETTE[0];
+  let b = PALETTE[PALETTE.length - 1];
+  for (let i = 0; i < PALETTE.length - 1; i++) {
+    if (tod >= PALETTE[i].t && tod <= PALETTE[i + 1].t) {
+      a = PALETTE[i];
+      b = PALETTE[i + 1];
+      break;
     }
-    // horizontal floor bands
-    c.fillStyle = "rgba(0,0,0,0.45)";
-    for (let y = 0; y < rows; y++) c.fillRect(0, y * ph, 256, 5);
-    grain(c, 256, 512, 16);
-  });
-}
-
-function signTexture(text: string, color: string) {
-  return texture(512, 128, (c) => {
-    c.fillStyle = "#060109";
-    c.fillRect(0, 0, 512, 128);
-    c.font = "bold 76px 'Arial Black', Impact, sans-serif";
-    c.textAlign = "center";
-    c.textBaseline = "middle";
-    c.shadowColor = color;
-    c.shadowBlur = 34;
-    c.fillStyle = color;
-    c.fillText(text, 256, 68);
-    c.fillText(text, 256, 68);
-    c.shadowBlur = 0;
-    c.fillStyle = "#fff";
-    c.globalAlpha = 0.55;
-    c.fillText(text, 256, 68);
-  });
-}
-
-function plateTexture(code: string) {
-  return texture(256, 128, (c) => {
-    c.fillStyle = "#f2efe4";
-    c.fillRect(0, 0, 256, 128);
-    c.strokeStyle = "#1a2a6b";
-    c.lineWidth = 7;
-    c.strokeRect(6, 6, 244, 116);
-    c.fillStyle = "#ff8a3c";
-    c.font = "bold 20px sans-serif";
-    c.textAlign = "center";
-    c.fillText("LEONIDA", 128, 30);
-    c.fillStyle = "#16224f";
-    c.font = "bold 58px 'Arial Black', sans-serif";
-    c.fillText(code, 128, 90);
-  });
-}
-
-/** Tiny deterministic RNG so a rebuild of the block looks identical. */
-function mulberry(seed: number) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  const u = b.t === a.t ? 0 : (tod - a.t) / (b.t - a.t);
+  const mix = (x: string, y: string) =>
+    new THREE.Color(x).lerp(new THREE.Color(y), u);
+  const num = (x: number, y: number) => x + (y - x) * u;
+  return {
+    zen: mix(a.zen, b.zen),
+    hor: mix(a.hor, b.hor),
+    gnd: mix(a.gnd, b.gnd),
+    sun: mix(a.sun, b.sun),
+    si: num(a.si, b.si),
+    hemi: num(a.hemi, b.hemi),
+    fog: mix(a.fog, b.fog),
+    fd: num(a.fd, b.fd),
+    night: num(a.night, b.night),
   };
 }
 
@@ -245,482 +211,369 @@ function mulberry(seed: number) {
 /* build                                                               */
 /* ------------------------------------------------------------------ */
 
-const SIGNS: [string, string][] = [
-  ["MALIBU", "#ff2e97"],
-  ["PAWN 24H", "#22e6ff"],
-  ["EL SOL", "#ffb347"],
-  ["VACANCY", "#ff3b30"],
-  ["CAFE CUBANO", "#9dff3d"],
-  ["NO CREDIT", "#ff5ad9"],
-  ["LIQUOR", "#22e6ff"],
-  ["MOTEL", "#ffb347"],
-];
-
-export function buildCity(scene: THREE.Scene): City {
-  const rnd = mulberry(1988);
+export function buildCity(
+  scene: THREE.Scene,
+  quality: CityQuality = "high",
+): City {
   const group = new THREE.Group();
-  const colliders: Collider[] = [];
-  const evidence: EvidenceTag[] = [];
-  const waypoints: THREE.Vector3[] = [];
   const disposables: { dispose: () => void }[] = [];
-  const animated: { m: THREE.Mesh; base: number; rate: number; phase: number }[] =
-    [];
-
-  const keep = <T extends { dispose: () => void }>(x: T) => {
-    disposables.push(x);
-    return x;
+  const keep = <T extends { dispose: () => void }>(d: T) => {
+    disposables.push(d);
+    return d;
   };
 
-  /* ---- sky ---- */
-  const sky = new THREE.Mesh(
-    keep(new THREE.SphereGeometry(400, 32, 20)),
-    keep(
-      new THREE.ShaderMaterial({
-        side: THREE.BackSide,
-        depthWrite: false,
-        uniforms: {
-          top: { value: new THREE.Color("#140a32") },
-          mid: { value: new THREE.Color("#6d1d63") },
-          low: { value: new THREE.Color("#ff8a4c") },
-        },
-        vertexShader: `
-          varying vec3 vP;
-          void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
-        `,
-        fragmentShader: `
-          varying vec3 vP;
-          uniform vec3 top; uniform vec3 mid; uniform vec3 low;
-          void main(){
-            float h = clamp(normalize(vP).y * 0.5 + 0.5, 0.0, 1.0);
-            vec3 c = mix(low, mid, smoothstep(0.42, 0.62, h));
-            c = mix(c, top, smoothstep(0.58, 0.95, h));
-            gl_FragColor = vec4(c, 1.0);
-          }
-        `,
-      }),
-    ),
-  );
-  sky.frustumCulled = false;
-  group.add(sky);
+  const tex = keep(buildTextures());
+  const mat = keep(buildMaterials(tex));
+  const bank = new MeshBank();
+  const grid = new CollisionGrid();
+  const evidence: EvidenceTag[] = [];
+  const walk: THREE.Vector3[] = [];
+  const lamps: { x: number; z: number; h: number }[] = [];
+  const parked: { x: number; z: number; rot: number; kind: number }[] = [];
+  const tags: { x: number; y: number; z: number; rot: number; label: string }[] = [];
+  const heads: SignalHead[] = [];
 
-  scene.fog = new THREE.FogExp2(0x3a1140, 0.017);
+  const ctx: WorldCtx = {
+    bank,
+    mat,
+    tex,
+    grid,
+    walk,
+    lamps,
+    parked,
+    evidence,
+    tags,
+    group,
+    keep,
+  };
 
-  /* ---- road ---- */
-  const road = new THREE.Mesh(
-    keep(new THREE.PlaneGeometry(ROAD_HALF * 2, BLOCK_LEN * 2)),
-    keep(
-      new THREE.MeshStandardMaterial({
-        map: keep(asphalt()),
-        // The road is one flat plane, so a low roughness turns each light into
-        // a single huge specular blob instead of a wet sheen. Keep it matte.
-        roughness: 0.78,
-        metalness: 0.08,
-        color: 0xffffff,
-      }),
-    ),
-  );
-  road.rotation.x = -Math.PI / 2;
-  road.receiveShadow = true;
-  group.add(road);
+  /* ---- the ground everything else sits on ---- */
+  const base = bank.bucket("base", mat.dirt);
+  base.ground(0, 0, EXTENT * 2 + 900, EXTENT * 2 + 900, -0.08, { uvScale: 26 });
 
-  const line = new THREE.Mesh(
-    keep(new THREE.PlaneGeometry(0.42, BLOCK_LEN * 2)),
-    keep(
-      new THREE.MeshBasicMaterial({
-        map: keep(roadLine()),
-        transparent: true,
-        opacity: 0.8,
-      }),
-    ),
-  );
-  line.rotation.x = -Math.PI / 2;
-  line.position.y = 0.012;
-  group.add(line);
+  /* ---- roads, then blocks ---- */
+  const net: RoadNet = buildRoadNet();
+  buildRoads({ bank, mat, grid, walk, lamps }, net);
+  collectSignalHeads(net, heads);
 
-  const walkMat = keep(
-    new THREE.MeshStandardMaterial({
-      map: keep(sidewalk()),
-      roughness: 0.9,
-      metalness: 0.02,
-    }),
-  );
-  const curbGeo = keep(
-    new THREE.BoxGeometry(WALK_HALF - ROAD_HALF, 0.16, BLOCK_LEN * 2),
-  );
-  for (const sx of [-1, 1]) {
-    const walk = new THREE.Mesh(curbGeo, walkMat);
-    walk.position.set((sx * (ROAD_HALF + WALK_HALF)) / 2, 0.08, 0);
-    walk.receiveShadow = true;
-    group.add(walk);
+  for (let i = 0; i < GRID; i++) {
+    for (let j = 0; j < GRID; j++) buildCell(ctx, i, j);
   }
 
-  // neon smears on the wet road — cheap stand-in for real reflections
-  const puddleMat = keep(
-    new THREE.MeshBasicMaterial({
-      color: 0xff2e97,
-      transparent: true,
-      opacity: 0.16,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }),
-  );
-  const puddleGeo = keep(new THREE.PlaneGeometry(2.6, 9));
-  for (let i = 0; i < 16; i++) {
-    const p = new THREE.Mesh(puddleGeo, puddleMat);
-    p.rotation.x = -Math.PI / 2;
-    p.position.set(
-      (rnd() - 0.5) * ROAD_HALF * 1.9,
-      0.02,
-      (rnd() - 0.5) * BLOCK_LEN * 1.7,
-    );
-    p.scale.setScalar(0.5 + rnd());
-    group.add(p);
-  }
+  /* ---- coast ---- */
+  buildCoast(ctx);
+  buildHarbour(ctx);
+  const moorings = buildMarina(ctx);
 
-  /* ---- buildings ---- */
-  const facades = [facade(11), facade(29), facade(47), facade(63), facade(81)];
-  facades.forEach((f) => keep(f));
+  /* ---- the things you navigate by ---- */
+  buildLandmarks(ctx);
 
-  for (const sx of [-1, 1]) {
-    let z = -BLOCK_LEN;
-    while (z < BLOCK_LEN) {
-      const depth = 9 + rnd() * 9;
-      const width = 7 + rnd() * 7;
-      const height = 8 + rnd() * 30;
-      const x = sx * (WALK_HALF + depth / 2);
-      const cz = z + width / 2;
-
-      const tex = facades[Math.floor(rnd() * facades.length)].clone();
-      tex.needsUpdate = true;
-      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-      tex.repeat.set(Math.max(1, Math.round(width / 5)), Math.max(1, Math.round(height / 4)));
-      keep(tex);
-
-      const mat = keep(
-        new THREE.MeshStandardMaterial({
-          map: tex,
-          emissiveMap: tex,
-          emissive: new THREE.Color(0xffffff),
-          emissiveIntensity: 0.55,
-          roughness: 0.82,
-          metalness: 0.08,
-        }),
-      );
-      const b = new THREE.Mesh(keep(new THREE.BoxGeometry(depth, height, width)), mat);
-      b.position.set(x, height / 2, cz);
-      b.castShadow = true;
-      b.receiveShadow = true;
-      group.add(b);
-
-      colliders.push({
-        minX: x - depth / 2,
-        maxX: x + depth / 2,
-        minZ: cz - width / 2,
-        maxZ: cz + width / 2,
-      });
-
-      // a sign on roughly every other storefront
-      if (rnd() > 0.35) {
-        const [text, color] = SIGNS[Math.floor(rnd() * SIGNS.length)];
-        const sTex = keep(signTexture(text, color));
-        const sign = new THREE.Mesh(
-          keep(new THREE.PlaneGeometry(Math.min(width * 0.8, 6), 1.5)),
-          keep(
-            new THREE.MeshBasicMaterial({
-              map: sTex,
-              transparent: true,
-              blending: THREE.AdditiveBlending,
-              depthWrite: false,
-              side: THREE.DoubleSide,
-            }),
-          ),
-        );
-        sign.position.set(x - sx * (depth / 2 + 0.06), 3.4 + rnd() * 3, cz);
-        sign.rotation.y = sx > 0 ? Math.PI / 2 : -Math.PI / 2;
-        group.add(sign);
-        animated.push({
-          m: sign,
-          base: 1,
-          rate: 1.4 + rnd() * 5,
-          phase: rnd() * 10,
-        });
-
-        const glow = new THREE.PointLight(new THREE.Color(color), 9, 13, 2);
-        glow.position.copy(sign.position);
-        glow.position.x -= sx * 0.7;
-        group.add(glow);
-      }
-
-      z += width + 1 + rnd() * 3;
-    }
-  }
-
-  /* ---- the landmark you should probably crop out ---- */
-  const towerH = 46;
-  const tower = new THREE.Mesh(
-    keep(new THREE.CylinderGeometry(2.4, 3.4, towerH, 10)),
-    keep(
-      new THREE.MeshStandardMaterial({
-        color: 0x1b1030,
-        roughness: 0.6,
-        metalness: 0.4,
-        emissive: new THREE.Color(0x2a0f3a),
-        emissiveIntensity: 0.6,
-      }),
-    ),
-  );
-  tower.position.set(-24, towerH / 2, -46);
-  tower.castShadow = true;
-  group.add(tower);
-  colliders.push({ minX: -28, maxX: -20, minZ: -50, maxZ: -42 });
-
-  const crown = new THREE.Mesh(
-    keep(new THREE.PlaneGeometry(11, 3.2)),
-    keep(
-      new THREE.MeshBasicMaterial({
-        map: keep(signTexture("LEONIDA", "#22e6ff")),
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      }),
-    ),
-  );
-  crown.position.set(-24, towerH - 3, -45.2);
-  group.add(crown);
-  animated.push({ m: crown, base: 1, rate: 0.8, phase: 2 });
-  evidence.push({
-    kind: "LANDMARK",
-    label: "LEONIDA TOWER",
-    object: crown,
-    offset: new THREE.Vector3(),
-    radius: 6,
+  /* ---- weld it all down ---- */
+  bank.flush(group, keep, {
+    // only the geometry that can throw a shadow anyone will notice
+    castShadow: (k) =>
+      quality === "high" &&
+      (k.startsWith("facade") || k === "prop" || k === "metal" || k.startsWith("shop")),
+    receiveShadow: (k) => k !== "neon" && k !== "pool" && k !== "sign",
+    renderOrder: (k) => (k === "pool" ? 1 : k === "mark" ? 1 : k === "neon" || k === "sign" ? 2 : 0),
   });
+  const buildings = group.children.filter((c) => c.name.startsWith("facade")).length;
 
-  /* ---- palms ---- */
-  const trunkGeo = keep(new THREE.CylinderGeometry(0.11, 0.2, 6.2, 7));
-  const trunkMat = keep(new THREE.MeshStandardMaterial({ color: 0x3a2a1e, roughness: 1 }));
-  const frondGeo = keep(new THREE.PlaneGeometry(3.4, 0.55));
-  const frondMat = keep(
-    new THREE.MeshStandardMaterial({
-      color: 0x1c6b4a,
-      roughness: 0.85,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.96,
+  /* ---- sky, sea, skyline ---- */
+  const sky = buildSky();
+  keep(sky.geo);
+  keep(sky.mat);
+  group.add(sky.mesh);
+
+  const ocean = keep(buildOcean());
+  group.add(ocean.mesh);
+
+  const far = buildSkyline(tex);
+  if (far) {
+    keep(far.geo);
+    keep(far.mat);
+    group.add(far.mesh);
+  }
+
+  scene.fog = new THREE.FogExp2(0x4a1852, 0.001);
+
+  /*
+   * Parked vehicles are solid too. `top` is kept just under the ray test's
+   * threshold so a parked car stops the player walking through it without
+   * yanking the third-person camera in every time you pass one.
+   */
+  for (const p of parked) {
+    const wide = Math.abs(Math.cos(p.rot)) > 0.5;
+    grid.box(p.x, p.z, wide ? 2.1 : 4.9, wide ? 4.9 : 2.1, 1.15);
+  }
+
+  /* ---- moving parts ---- */
+  const traffic = keep(
+    new Traffic({
+      net,
+      rnd: mulberry(90210),
+      moving: quality === "high" ? 140 : 60,
+      parked,
+      heads,
+      evidence,
     }),
   );
-  for (const sx of [-1, 1]) {
-    for (let z = -BLOCK_LEN + 6; z < BLOCK_LEN; z += 13) {
-      const x = sx * (ROAD_HALF + 1.5);
-      const zz = z + rnd() * 3;
-      const palm = new THREE.Group();
-      const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-      trunk.position.y = 3.1;
-      trunk.rotation.z = (rnd() - 0.5) * 0.18;
-      trunk.castShadow = true;
-      palm.add(trunk);
-      for (let f = 0; f < 7; f++) {
-        const fr = new THREE.Mesh(frondGeo, frondMat);
-        const a = (f / 7) * Math.PI * 2;
-        fr.position.set(Math.cos(a) * 1.5, 6.1 - 0.2, Math.sin(a) * 1.5);
-        fr.rotation.set(-0.35 + rnd() * 0.2, -a, 0.2);
-        palm.add(fr);
-      }
-      palm.position.set(x, 0.16, zz);
-      group.add(palm);
+  group.add(traffic.group);
 
-      // street lamp beside every other palm
-      if ((z | 0) % 26 === 0) {
-        const lamp = new THREE.PointLight(0xffc98a, 14, 18, 2);
-        lamp.position.set(x, 5.4, zz);
-        group.add(lamp);
-        const bulb = new THREE.Mesh(
-          keep(new THREE.SphereGeometry(0.16, 8, 6)),
-          keep(new THREE.MeshBasicMaterial({ color: 0xffd9a8 })),
-        );
-        bulb.position.copy(lamp.position);
-        group.add(bulb);
-      }
-    }
-  }
+  const crowd = keep(new Crowd(walk, quality === "high" ? 170 : 80));
+  group.add(crowd.group);
 
-  /* ---- parked cars, each with a readable plate ---- */
-  const CAR_COLORS = [0xff2e97, 0x22e6ff, 0xffb347, 0x9dff3d, 0xe8e4dc, 0x2f6bff];
-  const PLATES = ["VC 4 LIFE", "8QX 220", "LEO 991", "TRNK FL", "77 VICE"];
-  const wheelGeo = keep(new THREE.CylinderGeometry(0.33, 0.33, 0.24, 12));
-  const wheelMat = keep(new THREE.MeshStandardMaterial({ color: 0x0c0c10, roughness: 0.95 }));
-
-  for (let i = 0; i < 8; i++) {
-    const sx = i % 2 === 0 ? -1 : 1;
-    const z = -BLOCK_LEN + 12 + i * 18 + rnd() * 6;
-    const car = new THREE.Group();
-    const color = CAR_COLORS[Math.floor(rnd() * CAR_COLORS.length)];
-
-    const body = new THREE.Mesh(
-      keep(new THREE.BoxGeometry(1.85, 0.62, 4.3)),
-      keep(
-        new THREE.MeshStandardMaterial({
-          color,
-          roughness: 0.28,
-          metalness: 0.75,
-        }),
-      ),
-    );
-    body.position.y = 0.72;
-    body.castShadow = true;
-    car.add(body);
-
-    const cabin = new THREE.Mesh(
-      keep(new THREE.BoxGeometry(1.66, 0.55, 2.1)),
-      keep(
-        new THREE.MeshStandardMaterial({
-          color: 0x0a0a14,
-          roughness: 0.15,
-          metalness: 0.9,
-        }),
-      ),
-    );
-    cabin.position.set(0, 1.28, -0.2);
-    cabin.castShadow = true;
-    car.add(cabin);
-
-    for (const wx of [-0.92, 0.92]) {
-      for (const wz of [-1.45, 1.45]) {
-        const w = new THREE.Mesh(wheelGeo, wheelMat);
-        w.rotation.z = Math.PI / 2;
-        w.position.set(wx, 0.34, wz);
-        car.add(w);
-      }
-    }
-
-    const tail = new THREE.Mesh(
-      keep(new THREE.BoxGeometry(1.5, 0.12, 0.05)),
-      keep(new THREE.MeshBasicMaterial({ color: 0xff2b2b })),
-    );
-    tail.position.set(0, 0.86, -2.17);
-    car.add(tail);
-
-    const code = PLATES[i % PLATES.length];
-    const plate = new THREE.Mesh(
-      keep(new THREE.PlaneGeometry(0.52, 0.26)),
-      keep(new THREE.MeshBasicMaterial({ map: keep(plateTexture(code)) })),
-    );
-    plate.position.set(0, 0.62, -2.18);
-    plate.rotation.y = Math.PI;
-    car.add(plate);
-
-    car.position.set(sx * (ROAD_HALF - 1.5), 0, z);
-    car.rotation.y = sx > 0 ? Math.PI : 0;
-    group.add(car);
-
-    colliders.push({
-      minX: car.position.x - 1.2,
-      maxX: car.position.x + 1.2,
-      minZ: z - 2.4,
-      maxZ: z + 2.4,
-    });
-
-    evidence.push({
-      kind: "PLATE",
-      label: `PLATE ${code}`,
-      object: plate,
-      offset: new THREE.Vector3(),
-      radius: 0.45,
-    });
-  }
-
-  /* ---- sidewalk waypoints for pedestrians ---- */
-  for (const sx of [-1, 1]) {
-    for (let z = -BLOCK_LEN + 8; z < BLOCK_LEN - 8; z += 11) {
-      waypoints.push(
-        new THREE.Vector3(sx * (ROAD_HALF + 2.2 + rnd() * 1.6), 0, z + rnd() * 4),
-      );
-    }
-  }
+  const boats = keep(new Boats(boatRoutes(), moorings, quality === "high" ? 3 : 2));
+  group.add(boats.group);
 
   /* ---- lighting ---- */
-  // Key light is offset to the side rather than straight down the street: a
-  // head-on sun blew the whole frame out and buried the HUD. The hemisphere
-  // carries the road and the fill carries the character.
-  const hemi = new THREE.HemisphereLight(0xffa8d8, 0x4a3560, 1.9);
+  const hemi = new THREE.HemisphereLight(0xffa8d8, 0x4a3560, 1.05);
   group.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xffb178, 1.5);
-  sun.position.set(34, 20, -26);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);
+  const sun = new THREE.DirectionalLight(0xffb178, 0.8);
+  sun.castShadow = quality === "high";
+  sun.shadow.mapSize.set(quality === "high" ? 2048 : 1024, quality === "high" ? 2048 : 1024);
   sun.shadow.camera.near = 1;
-  sun.shadow.camera.far = 90;
-  sun.shadow.camera.left = -26;
-  sun.shadow.camera.right = 26;
-  sun.shadow.camera.top = 26;
-  sun.shadow.camera.bottom = -26;
-  sun.shadow.bias = -0.0009;
+  sun.shadow.camera.far = 340;
+  sun.shadow.camera.left = -70;
+  sun.shadow.camera.right = 70;
+  sun.shadow.camera.top = 70;
+  sun.shadow.camera.bottom = -70;
+  sun.shadow.bias = -0.0012;
+  sun.shadow.normalBias = 0.05;
   group.add(sun);
   group.add(sun.target);
 
-  const fill = new THREE.DirectionalLight(0x6fe6ff, 1.0);
-  fill.position.set(-16, 9, 24);
+  const fill = new THREE.DirectionalLight(0x6fe6ff, 0.42);
+  fill.position.set(-120, 90, 160);
   group.add(fill);
 
-  const bounce = new THREE.DirectionalLight(0xff7ac0, 0.6);
-  bounce.position.set(18, 4, 20);
-  group.add(bounce);
+  /*
+   * Four roaming point lights, re-homed onto the nearest street lamps every
+   * half second. The city's lighting is emissive geometry, but the player
+   * character is a real lit mesh, so these are what make them pick up the
+   * colour of the lamp they are standing under.
+   */
+  const spots: THREE.PointLight[] = [];
+  for (let n = 0; n < (quality === "high" ? 4 : 2); n++) {
+    const p = new THREE.PointLight(0xffc98a, 0, 26, 2);
+    p.position.set(0, -50, 0);
+    group.add(p);
+    spots.push(p);
+  }
 
   scene.add(group);
 
+  /* ---- state ---- */
+  /*
+   * On the seafront, facing west into the city, so the first thing the player
+   * sees is the skyline rather than the sea. Every fast-travel target sits on
+   * a road intersection — open ground by construction — and the spawn is then
+   * pushed out of anything it happens to land in.
+   */
+  const spawnPlace = LANDMARK_SPOTS[0];
+  const _spawn = new THREE.Vector3(spawnPlace.x, 0, spawnPlace.z);
+  resolveCollisions(_spawn, 0.45, grid);
+  const spawn = { x: _spawn.x, z: _spawn.z, yaw: -Math.PI / 2 };
+
+  const state = {
+    tod: MODE_TIME.sunset,
+    night: 0.55,
+    /** "auto" runs the clock; the rest pin the world to one lighting setup. */
+    mode: "sunset" as TimeMode,
+  };
+  const scratch: Collider[] = [];
+  const _from = new THREE.Vector3();
+  let sinceLights = 9;
+
+  function applyTime() {
+    const p = samplePalette(state.tod);
+    state.night = p.night;
+
+    // sun tracks a plausible arc: up in the east, down in the west
+    const ang = (state.tod - 0.25) * Math.PI * 2;
+    const elev = Math.sin(ang);
+    const dir = new THREE.Vector3(
+      Math.cos(ang) * 0.75,
+      Math.max(elev, -0.35),
+      -0.45,
+    ).normalize();
+
+    sky.mat.uniforms.zenith.value.copy(p.zen);
+    sky.mat.uniforms.horizon.value.copy(p.hor);
+    sky.mat.uniforms.ground.value.copy(p.gnd);
+    sky.mat.uniforms.sunDir.value.copy(dir);
+    sky.mat.uniforms.night.value = p.night;
+
+    sun.color.copy(p.sun);
+    sun.intensity = p.si;
+    hemi.intensity = p.hemi;
+    hemi.color.copy(p.hor).lerp(new THREE.Color(0xffffff), 0.25);
+    fill.intensity = 0.2 + (1 - p.night) * 0.75;
+
+    const fog = scene.fog as THREE.FogExp2 | null;
+    if (fog) {
+      fog.color.copy(p.fog);
+      fog.density = p.fd;
+    }
+    ocean.material.uniforms.fogColor.value.copy(p.fog);
+    ocean.material.uniforms.fogDensity.value = p.fd;
+    ocean.material.uniforms.sky.value.copy(p.hor);
+    ocean.material.uniforms.deep.value
+      .set("#07203a")
+      .lerp(new THREE.Color("#02060e"), p.night);
+
+    // Windows, signage and lamp spill all come up as the light goes down. This
+    // is the entire night lighting model — there is no dynamic light doing it.
+    const glow = 0.18 + p.night * 1.25;
+    for (const m of mat.emissives) m.emissiveIntensity = glow;
+    mat.neon.opacity = 0.32 + p.night * 0.68;
+    mat.sign.opacity = 0.28 + p.night * 0.72;
+    mat.pool.opacity = 0.04 + p.night * 1.15;
+    for (const s of spots) s.intensity = p.night * 16;
+  }
+  applyTime();
+
   return {
     group,
-    colliders,
+    grid,
     evidence,
-    waypoints,
+    waypoints: walk,
     sun,
-    update(t) {
-      // neon flicker — a couple of the signs are on their last legs
-      for (const a of animated) {
-        const m = a.m.material as THREE.MeshBasicMaterial;
-        const f = Math.sin(t * a.rate + a.phase);
-        const glitch = Math.sin(t * 31 + a.phase * 7) > 0.93 ? 0.35 : 1;
-        m.opacity = a.base * (0.78 + f * 0.12) * glitch;
+    spawn,
+    get timeOfDay() {
+      return state.tod;
+    },
+    get nightness() {
+      return state.night;
+    },
+    setTimeOfDay(t) {
+      state.tod = ((t % 1) + 1) % 1;
+      applyTime();
+    },
+    get timeMode() {
+      return state.mode;
+    },
+    setTimeMode(mode) {
+      state.mode = mode;
+      if (mode !== "auto") state.tod = MODE_TIME[mode];
+      applyTime();
+      return mode;
+    },
+    cycleTimeMode() {
+      const next = TIME_MODES[(TIME_MODES.indexOf(state.mode) + 1) % TIME_MODES.length];
+      return this.setTimeMode(next);
+    },
+    stats: {
+      buildings,
+      colliders: grid.count,
+      draws: group.children.length,
+    },
+
+    update(dt, t, opts) {
+      // a full Leonida day runs about eight minutes, unless the player has
+      // pinned the lighting to one time
+      if (state.mode === "auto") state.tod = (state.tod + dt / 480) % 1;
+      applyTime();
+
+      // keep the shadow volume on the player, not on the world origin
+      sun.target.position.set(opts.x, 0, opts.z);
+      sun.target.updateMatrixWorld();
+      const d = sky.mat.uniforms.sunDir.value as THREE.Vector3;
+      sun.position.set(opts.x + d.x * 150, 30 + d.y * 150, opts.z + d.z * 150);
+
+      ocean.update(t);
+      traffic.update(dt, t, opts.x, opts.z, state.night);
+      crowd.update(dt, opts.x, opts.z, opts.heat);
+      boats.update(dt, t);
+
+      sinceLights += dt;
+      if (sinceLights > 0.5) {
+        sinceLights = 0;
+        nearestLamps(lamps, opts.x, opts.z, spots);
       }
     },
+
+    resolveVehicles(pos, radius) {
+      traffic.resolveAgainst(pos, radius);
+    },
+    blocked(from, to) {
+      return grid.blocked(from, to);
+    },
+    rayHit(from, to) {
+      return grid.rayHit(_from.copy(from), to);
+    },
+
     dispose() {
       for (const d of disposables) d.dispose();
+      group.traverse((o) => {
+        const m = o as THREE.Mesh;
+        m.geometry?.dispose?.();
+      });
       scene.remove(group);
       scene.fog = null;
+      void scratch;
     },
   };
 }
 
-export const CITY_BOUNDS = { road: ROAD_HALF, walk: WALK_HALF, len: BLOCK_LEN };
+/* ------------------------------------------------------------------ */
+/* helpers                                                             */
+/* ------------------------------------------------------------------ */
 
-/** Push a capsule out of every box it overlaps. */
+function collectSignalHeads(net: RoadNet, out: SignalHead[]) {
+  for (const s of net.signals) {
+    // one head per approach, on the near kerb, matching roads.ts
+    for (const [ax, az] of [[0, -1], [0, 1], [-1, 0], [1, 0]] as const) {
+      const axis: 0 | 1 = ax === 0 ? 0 : 1;
+      out.push({
+        x: s.x + ax * 12 + (ax === 0 ? 9 : 0),
+        y: 5.8,
+        z: s.z + az * 12 + (az === 0 ? 9 : 0),
+        axis,
+        offset: s.offset,
+      });
+    }
+  }
+}
+
+/** Re-homes the roaming point lights onto the closest street lamps. */
+function nearestLamps(
+  lamps: { x: number; z: number; h: number }[],
+  x: number,
+  z: number,
+  out: THREE.PointLight[],
+) {
+  const best: { d: number; l: { x: number; z: number; h: number } }[] = [];
+  for (const l of lamps) {
+    const d = (l.x - x) ** 2 + (l.z - z) ** 2;
+    if (d > 60 * 60) continue;
+    best.push({ d, l });
+  }
+  best.sort((a, b) => a.d - b.d);
+  for (let i = 0; i < out.length; i++) {
+    const pick = best[i];
+    if (pick) out[i].position.set(pick.l.x, pick.l.h - 0.4, pick.l.z);
+    else out[i].position.set(x, -60, z);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* collision (public API, unchanged in shape)                          */
+/* ------------------------------------------------------------------ */
+
+const _scratch: Collider[] = [];
+
+/** Push a capsule out of every wall it overlaps, and keep it on the map. */
 export function resolveCollisions(
   pos: THREE.Vector3,
   radius: number,
-  colliders: Collider[],
+  grid: CollisionGrid,
 ) {
-  for (const c of colliders) {
-    if (
-      pos.x < c.minX - radius ||
-      pos.x > c.maxX + radius ||
-      pos.z < c.minZ - radius ||
-      pos.z > c.maxZ + radius
-    )
-      continue;
-
-    const dxMin = pos.x - (c.minX - radius);
-    const dxMax = c.maxX + radius - pos.x;
-    const dzMin = pos.z - (c.minZ - radius);
-    const dzMax = c.maxZ + radius - pos.z;
-    const m = Math.min(dxMin, dxMax, dzMin, dzMax);
-    if (m === dxMin) pos.x = c.minX - radius;
-    else if (m === dxMax) pos.x = c.maxX + radius;
-    else if (m === dzMin) pos.z = c.minZ - radius;
-    else pos.z = c.maxZ + radius;
-  }
-  const lim = CITY_BOUNDS.len - 3;
+  grid.resolve(pos, radius, _scratch);
+  const lim = EXTENT - 2;
+  pos.x = Math.max(-lim, Math.min(EXTENT + 44, pos.x));
   pos.z = Math.max(-lim, Math.min(lim, pos.z));
-  pos.x = Math.max(-CITY_BOUNDS.walk - 0.4, Math.min(CITY_BOUNDS.walk + 0.4, pos.x));
 }
+
+export { CollisionGrid };

@@ -4,12 +4,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   StreetEngine,
   developPhoto,
+  type CameraMode,
   type Quality,
   type Stats,
 } from "@/lib/three/engine";
+import type { TimeMode } from "@/lib/three/city";
+import { LANDMARK_SPOTS } from "@/lib/three/world/layout";
 import { heatTier } from "@/lib/forensics";
 import { tintOf, type Evidence } from "@/lib/evidence";
 import { sfx } from "@/lib/audio";
+import Minimap from "@/components/apps/Minimap";
 
 export type StreetPhoto = {
   src: string;
@@ -24,13 +28,62 @@ const EMPTY: Stats = {
   aiming: false,
   inFrame: [],
   fps: 60,
+  place: "LEONIDA",
+  district: "",
+  x: 0,
+  z: 0,
+  camYaw: 0,
+  timeOfDay: 0.79,
+  timeMode: "sunset",
+  camera: "shoulder",
 };
 
+const TIME_LABEL: Record<TimeMode, string> = {
+  auto: "AUTO",
+  day: "DAY",
+  sunset: "SUNSET",
+  night: "NIGHT",
+};
+
+const CAMERA_LABEL: Record<CameraMode, string> = {
+  shoulder: "SHOULDER",
+  wide: "WIDE",
+  cinematic: "CINEMA",
+};
+
+/** Leonida runs on a 24-hour clock; the world hands us 0..1 through the day. */
+function clock(t: number) {
+  const mins = Math.round(t * 1440) % 1440;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+const KEYS: [string, string][] = [
+  ["W A S D / ↑ ↓ ← →", "walk"],
+  ["SHIFT", "sprint"],
+  ["SPACE", "jump"],
+  ["MOUSE / Q E", "look around"],
+  ["R  V", "look up / down"],
+  ["F", "raise the phone"],
+  ["ENTER", "take the shot"],
+  ["C", "camera distance"],
+  ["T  ·  1-9", "travel across the city"],
+  ["N", "daylight / sunset / night"],
+  ["[  ]", "scrub the clock"],
+  ["X", "back to the seafront"],
+  ["H", "this list"],
+  ["ESC", "back to the phone"],
+];
 
 /**
  * The 3D half of the loop. You walk Leonida in third person, raise the phone,
  * and whatever the shutter catches becomes the frame you take into the Image
  * Lab — including a list of everything identifiable that was in it.
+ *
+ * Shots now collect into a film roll rather than ejecting you to the editor on
+ * the first press, so a trip across the city can come back with a set to
+ * choose from.
  */
 export default function StreetMode({
   heat,
@@ -52,6 +105,9 @@ export default function StreetMode({
   const [flash, setFlash] = useState(false);
   const [busy, setBusy] = useState(false);
   const [quality, setQuality] = useState<Quality>("high");
+  const [roll, setRoll] = useState<StreetPhoto[]>([]);
+  const [showKeys, setShowKeys] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
   /* ---------------- engine lifecycle ---------------- */
   useEffect(() => {
@@ -73,6 +129,11 @@ export default function StreetMode({
           },
         });
         engineRef.current = engine;
+        engine.setEventSink((e) => {
+          if (e.kind === "travel") setToast(e.place);
+          if (e.kind === "camera") setToast(`CAMERA · ${CAMERA_LABEL[e.camera]}`);
+          if (e.kind === "time") setToast(`LIGHT · ${TIME_LABEL[e.mode]}`);
+        });
         engine.start();
         setReady(true);
       } catch (err) {
@@ -103,12 +164,10 @@ export default function StreetMode({
   }, [heat, ready]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onExit();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onExit]);
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 1800);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   /* ---------------- shutter ---------------- */
   const shoot = useCallback(async () => {
@@ -122,17 +181,39 @@ export default function StreetMode({
     try {
       const shot = engine.capture();
       const src = await developPhoto(shot.dataUrl, shot.title, shot.location);
-      onShoot({
-        src,
-        title: shot.title,
-        location: shot.location,
-        evidence: shot.evidence,
-      });
+      setRoll((r) => [
+        { src, title: shot.title, location: shot.location, evidence: shot.evidence },
+        ...r,
+      ].slice(0, 12));
+      setToast(`FRAME SAVED · ${shot.location}`);
     } catch (err) {
       console.error("[vice-os] capture:", err);
+    } finally {
       setBusy(false);
     }
-  }, [busy, onShoot]);
+  }, [busy]);
+
+  /* ---------------- keys that belong to the UI, not the engine ---------------- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = document.activeElement;
+      if (
+        el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          (el as HTMLElement).isContentEditable)
+      )
+        return;
+      if (e.key === "Escape") onExit();
+      if (e.code === "KeyH" || e.key.toLowerCase() === "h") setShowKeys((v) => !v);
+      if (e.code === "Enter" || e.key === "Enter") {
+        e.preventDefault();
+        void shoot();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onExit, shoot]);
 
   /* ---------------- touch controls ---------------- */
   const stickRef = useRef<HTMLDivElement>(null);
@@ -242,13 +323,37 @@ export default function StreetMode({
           <p className="font-mono text-[9px] tracking-[0.24em] text-vice-cyan">
             VICE OS // LEONIDA LIVE
           </p>
-          <p className="mt-0.5 font-mono text-[10px] tabular-nums text-white/55">
+          <p className="mt-0.5 font-mono text-[11px] tracking-[0.1em] text-white/80">
+            {stats.place}
+          </p>
+          <p className="mt-0.5 font-mono text-[10px] tabular-nums text-white/45">
             {stats.heading} · {(stats.speed * 3.6).toFixed(0)} KM/H ·{" "}
-            {stats.fps.toFixed(0)} FPS
+            {clock(stats.timeOfDay)} · {stats.fps.toFixed(0)} FPS
           </p>
         </div>
 
         <div className="pointer-events-auto flex items-center gap-2">
+          <button
+            onClick={() => engineRef.current?.cycleTimeMode()}
+            className="glass-deep rounded-xl px-3 py-2 font-mono text-[9px] tracking-[0.18em] text-vice-cyan transition hover:text-white"
+            title="Daylight / sunset / night (N)"
+          >
+            {TIME_LABEL[stats.timeMode]}
+          </button>
+          <button
+            onClick={() => engineRef.current?.cycleCameraMode()}
+            className="glass-deep rounded-xl px-3 py-2 font-mono text-[9px] tracking-[0.18em] text-white/60 transition hover:text-white"
+            title="Camera distance (C)"
+          >
+            {CAMERA_LABEL[stats.camera]}
+          </button>
+          <button
+            onClick={() => setShowKeys((v) => !v)}
+            className="glass-deep rounded-xl px-3 py-2 font-mono text-[9px] tracking-[0.18em] text-white/60 transition hover:text-white"
+            title="Controls (H)"
+          >
+            KEYS
+          </button>
           <button
             onClick={() => setQuality((q) => (q === "high" ? "low" : "high"))}
             className="glass-deep rounded-xl px-3 py-2 font-mono text-[9px] tracking-[0.18em] text-white/60 transition hover:text-white"
@@ -296,7 +401,7 @@ export default function StreetMode({
       </div>
 
       {/* what the lens can identify right now */}
-      <div className="pointer-events-none absolute right-4 top-24 w-[190px] space-y-1.5">
+      <div className="pointer-events-none absolute right-4 top-28 w-[190px] space-y-1.5">
         <p className="text-right font-mono text-[9px] tracking-[0.24em] text-white/40">
           IN FRAME
         </p>
@@ -326,9 +431,55 @@ export default function StreetMode({
         </p>
       </div>
 
+      {/* the map, and where it can take you */}
+      {!aiming && ready && (
+        <div className="absolute left-4 top-32 hidden md:block">
+          <Minimap
+            x={stats.x}
+            z={stats.z}
+            yaw={stats.camYaw}
+            onTravel={(n) => engineRef.current?.travelTo(n)}
+          />
+          <p className="mt-1.5 max-w-[180px] font-mono text-[8px] leading-relaxed tracking-[0.12em] text-white/30">
+            CLICK THE MAP TO TRAVEL · {stats.district}
+          </p>
+        </div>
+      )}
+
+      {/* the film roll — every frame you've taken this trip */}
+      {roll.length > 0 && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-32 px-4 md:bottom-36">
+          <div className="pointer-events-auto mx-auto flex max-w-3xl items-end justify-center gap-2 overflow-x-auto pb-1">
+            {roll.map((p, i) => (
+              <button
+                key={`${p.title}-${i}`}
+                data-roll-shot
+                onClick={() => onShoot(p)}
+                aria-label={`Open ${p.title} in the Image Lab`}
+                className="group relative h-20 w-16 shrink-0 overflow-hidden rounded-md border border-white/25 transition hover:border-vice-cyan"
+                title={`${p.title} — open in the Image Lab`}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={p.src} alt={p.title} className="h-full w-full object-cover" />
+                {p.evidence.length > 0 && (
+                  <span className="absolute right-0.5 top-0.5 rounded bg-black/70 px-1 font-mono text-[7px] text-vice-blood">
+                    {p.evidence.length}
+                  </span>
+                )}
+                <span className="absolute inset-x-0 bottom-0 bg-black/70 py-0.5 text-center font-mono text-[7px] tracking-[0.1em] text-white/70 opacity-0 transition group-hover:opacity-100">
+                  EDIT
+                </span>
+              </button>
+            ))}
+          </div>
+          <p className="mt-1 text-center font-mono text-[8px] tracking-[0.18em] text-white/30">
+            {roll.length} FRAME{roll.length === 1 ? "" : "S"} ON THE ROLL · TAP ONE TO TAKE IT TO THE IMAGE LAB
+          </p>
+        </div>
+      )}
+
       {/* bottom chrome */}
       <div className="absolute inset-x-0 bottom-0 flex items-end justify-between gap-4 p-4 sm:p-6">
-        {/* left: stick (touch) / key legend (desktop) */}
         <div
           ref={stickRef}
           onPointerDown={(e) => {
@@ -354,11 +505,14 @@ export default function StreetMode({
             <p>
               <span className="text-vice-cyan">WASD</span> MOVE ·{" "}
               <span className="text-vice-cyan">SHIFT</span> SPRINT ·{" "}
-              <span className="text-vice-cyan">SPACE</span> JUMP
+              <span className="text-vice-cyan">Q E</span> TURN ·{" "}
+              <span className="text-vice-cyan">C</span> CAMERA
             </p>
             <p>
-              <span className="text-vice-cyan">MOUSE</span> LOOK (CLICK TO GRAB) ·{" "}
-              <span className="text-vice-cyan">F</span> RAISE PHONE
+              <span className="text-vice-cyan">F</span> PHONE ·{" "}
+              <span className="text-vice-cyan">ENTER</span> SHOOT ·{" "}
+              <span className="text-vice-cyan">T</span> TRAVEL ·{" "}
+              <span className="text-vice-cyan">H</span> ALL KEYS
             </p>
           </div>
         </div>
@@ -406,11 +560,54 @@ export default function StreetMode({
         </div>
       </div>
 
+      {/* transient readout for travel / camera changes */}
+      {toast && (
+        <div className="pointer-events-none absolute left-1/2 top-20 -translate-x-1/2">
+          <p className="glass-deep rounded-lg px-4 py-2 font-mono text-[10px] tracking-[0.22em] text-vice-cyan">
+            {toast}
+          </p>
+        </div>
+      )}
+
       {/* hint strip */}
-      {!aiming && ready && (
+      {!aiming && ready && roll.length === 0 && (
         <p className="pointer-events-none absolute inset-x-0 bottom-[7.5rem] text-center font-mono text-[10px] tracking-[0.2em] text-white/35 md:bottom-28">
-          RAISE THE PHONE TO FRAME A 4:5 SHOT · THE SHUTTER FEEDS THE IMAGE LAB
+          WALK THE CITY · RAISE THE PHONE · THE SHUTTER FEEDS THE IMAGE LAB
         </p>
+      )}
+
+      {/* the full key map */}
+      {showKeys && (
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          onClick={() => setShowKeys(false)}
+        >
+          <div className="glass-deep w-[min(30rem,88vw)] rounded-2xl p-6">
+            <p className="headline text-2xl text-vice-pink">CONTROLS</p>
+            <div className="mt-4 space-y-1.5">
+              {KEYS.map(([k, v]) => (
+                <div key={k} className="flex items-baseline justify-between gap-4">
+                  <span className="font-mono text-[10px] tracking-[0.12em] text-vice-cyan">
+                    {k}
+                  </span>
+                  <span className="font-mono text-[10px] tracking-[0.12em] text-white/55">
+                    {v}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-5 font-mono text-[9px] leading-relaxed tracking-[0.12em] text-white/30">
+              {LANDMARK_SPOTS.length} PLACES ON THE MAP. PRESS T TO WALK OUT OF THE
+              DISTRICT YOU&apos;RE IN.
+            </p>
+            <button
+              onClick={() => setShowKeys(false)}
+              className="mt-4 w-full rounded-lg bg-vice-pink py-2 font-mono text-[10px] font-bold tracking-[0.2em] text-vice-void"
+            >
+              CLOSE
+            </button>
+          </div>
+        </div>
       )}
 
       {!ready && (
@@ -419,11 +616,11 @@ export default function StreetMode({
             LEONIDA
           </p>
           <p className="font-mono text-[10px] tracking-[0.3em] text-vice-cyan">
-            BUILDING THE BLOCK…
+            BUILDING THE CITY…
           </p>
           <p className="max-w-xs text-center font-mono text-[9px] leading-relaxed tracking-[0.14em] text-white/30">
-            SKELETONS RIGGED · SURFACES SKINNED · SIGNAGE PAINTED — ALL AT RUNTIME,
-            NO ASSETS
+            TWELVE DISTRICTS ZONED · ROADS SIGNALISED · FACADES PAINTED · COASTLINE
+            FLOODED — ALL AT RUNTIME, NO ASSETS
           </p>
         </div>
       )}

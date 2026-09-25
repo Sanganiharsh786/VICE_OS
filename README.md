@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/media/street.jpg" alt="Walking a real-time 3D block of Leonida at dusk, with live evidence brackets snapping onto a parked car's plate and a pedestrian's face" width="100%">
+<img src="docs/media/street.jpg" alt="Walking a real-time 3D city block of Leonida at dusk, with live evidence brackets snapping onto a parked car's plate and a pedestrian's face" width="100%">
 
 # VICE OS — Leonida Live
 
@@ -54,7 +54,7 @@ functions of a pixel diff.
     <td width="33%"><img src="docs/media/image-lab-evidence.jpg" alt="The Image Lab with the forensic rail reading identifiability per subject while you work"></td>
   </tr>
   <tr>
-    <td align="center"><b>01 · Shoot it</b><br><sub>A real 3D block, in real time</sub></td>
+    <td align="center"><b>01 · Shoot it</b><br><sub>A real 3D city, in real time</sub></td>
     <td align="center"><b>02 · Get the bill</b><br><sub>Every subject the lens caught, priced</sub></td>
     <td align="center"><b>03 · Scrub it</b><br><sub>The rail re-reads your canvas as you work</sub></td>
   </tr>
@@ -93,7 +93,7 @@ walk back into. That is the whole pitch.
 
 | App | What you edit | What comes out |
 | --- | --- | --- |
-| **LEONIDA LIVE** | — | A real-time 3D block you walk in third person. The shutter renders a 1080×1350 frame **plus the rectangle every identifiable subject filled**, then runs FORENSIC VISION on it |
+| **LEONIDA LIVE** | — | A real-time open-world city you walk in third person. The shutter renders a 1080×1350 frame **plus the rectangle every identifiable subject filled**, then runs FORENSIC VISION on it |
 | **THE FIXER** | — | Timed contracts in two opposing categories, scored **entirely on the forensic scan of your export**: payouts, heat swings, a rank and a ledger |
 | **VICEGRAM** | A frame you shot in 3D, a procedurally painted scene, or your own photo | A before/after forensic report, an itemised heat bill, a post, and an aftermath that plays out across the other apps |
 | **MOST WANTED** | A blank booking plate — or **a photo you already published**, pulled from the state's evidence file | A composited WANTED bulletin with your live bounty, rap sheet and stars, downloadable as PNG |
@@ -104,11 +104,12 @@ walk back into. That is the whole pitch.
 
 The camera roll used to be the only source of images. Now there's a street.
 
-**LEONIDA LIVE** is a real-time WebGL scene — a block of Leonida at golden hour, rendered
-with three.js — that you walk in third person. Press `F` (or **RAISE PHONE**) and the
-camera drops into the phone: first person, 4:5 viewfinder, thirds grid. Press the shutter
-and the engine re-renders the frame at **1080×1350**, develops it with a film pass and a
-geotag stamp, and hands it straight to the Image Lab.
+**LEONIDA LIVE** is a real-time WebGL scene — about a square kilometre of Leonida,
+rendered with three.js — that you walk in third person. Press `F` (or **RAISE PHONE**) and
+the camera drops into the phone: first person, 4:5 viewfinder, thirds grid. Press the
+shutter and the engine re-renders the frame at **1080×1350**, develops it with a film pass
+and a geotag stamp, and drops it on the film roll. Shots collect as you walk; tap one to
+take it into the Image Lab.
 
 <img src="docs/media/viewfinder.jpg" alt="Phone raised: first person, a 4:5 viewfinder with a thirds grid over the 3D street" width="100%">
 
@@ -160,17 +161,57 @@ The same solver drives the player and the whole crowd. Pedestrians walk sidewalk
 waypoints, watch you when you get close, and **break away and run once your heat passes
 45** — which is exactly when you most want a photo of them.
 
-### Everything else in the scene
+### The city
 
-Procedural buildings with painted window grids and flickering neon signage, palms, street
-lamps, wet-asphalt neon smears, parked cars with readable plates, a landmark tower, and a
-gradient sky with a sun sitting on the horizon down the street. Post chain is bloom →
-tone map → a film pass with grain, vignette and chromatic aberration; at heat 50+ the
-police strobe bleeds in at the edges of the lens.
+Leonida is a 12 × 12 grid of 80-metre cells — roughly a square kilometre — laid out as a
+tilemap and generated from it at boot. Eleven district types (downtown, financial, old
+town, commercial, residential, industrial, park, beachfront, harbour, marina, open water)
+each set their own building density, height range, architecture, signage, traffic and
+crowd. None of it is authored by hand and none of it is downloaded.
 
-Quality toggle, touch joystick + drag-look on mobile, pointer lock with a drag-look
-fallback where the browser refuses it, and a clean failure card if WebGL is unavailable —
-the rest of the phone still works without it.
+Roads run along every cell boundary, so the grid *is* the road network. Avenues every
+third line carry four lanes; the streets between them carry two. Vehicles drive numbered
+lanes in a known direction, hold a gap to the car in front, stop behind the line at a red
+signal, and turn only onto roads that exist — which is why the grid ends cleanly at the
+coast instead of driving into the sea. A hundred and forty of them, plus a thousand parked,
+in four draw calls.
+
+Beyond that: a continuous beach, boardwalk and pier along the whole east coast, a working
+harbour with gantry cranes and container stacks, a marina, six over-scaled landmarks you
+can navigate by, a distant skyline ring that removes the map edge, and a full day/night
+cycle that turns every window, sign and street lamp on as the sun goes down. The lighting
+defaults to sunset and can be pinned to **day**, **sunset** or **night**, or set to
+**auto** to let the clock run — fog density is part of that palette, at its thinnest after
+dark so the neon two blocks away still reaches you.
+
+There are **no dynamic lights**. Lit windows, neon and lamp spill are emissive geometry
+and additive ground pools, which is what lets the city carry thousands of "lights" at
+sixty frames. Post chain is bloom → tone map → a film pass with grain, vignette and
+chromatic aberration; at heat 50+ the police strobe bleeds in at the edges of the lens.
+
+Minimap with click-to-travel, three camera distances, quality toggle, touch joystick +
+drag-look on mobile, pointer lock with a drag-look fallback where the browser refuses it,
+and a clean failure card if WebGL is unavailable — the rest of the phone still works
+without it.
+
+### Controls
+
+| | |
+|---|---|
+| `W A S D` / arrows | walk |
+| `Shift` | sprint |
+| `Space` | jump |
+| mouse, or `Q` `E` | look around |
+| `R` `V` | look up / down |
+| `F` | raise the phone |
+| `Enter` | take the shot |
+| `C` | camera distance |
+| `T`, `1`–`9`, or the map | travel across the city |
+| `N`, or the HUD chip | daylight / sunset / night |
+| `[` `]` | scrub the clock |
+| `X` | back to the seafront |
+| `H` | the full list, in game |
+| `Esc` | back to the phone |
 
 ## Contracts: the editor gets a scoreboard
 
@@ -414,9 +455,11 @@ whole loop in about ninety seconds. You can re-open it any time from the home sc
 Otherwise:
 
 1. Let it boot, tap to unlock, open **THE FIXER** and take a contract — the clock starts.
-2. Open **LEONIDA LIVE**. `WASD` to walk, `Shift` to sprint, mouse to look. Get close to
-   a pedestrian or a parked car and watch live brackets snap onto them.
-3. Press `F` to raise the phone, frame the 4:5 shot, and hit the shutter.
+2. Open **LEONIDA LIVE**. `WASD` to walk, `Shift` to sprint, mouse or `Q`/`E` to look,
+   `T` or the minimap to cross the city. Get close to a pedestrian or a parked car and
+   watch live brackets snap onto them.
+3. Press `F` to raise the phone, frame the 4:5 shot, and hit the shutter. Shots collect on
+   the film roll — tap one to take it to the lab.
 4. **FORENSIC VISION** brackets every subject the lens caught and prices the frame —
    *3 IDENTIFIABLE SUBJECTS · POTENTIAL EXPOSURE +20 HEAT* — before you touch the editor.
 5. The Image Lab opens with those rectangles on the rail. Sticker over the faces, crop out
@@ -457,7 +500,19 @@ src/
     three/
       rig.ts        procedural humanoid — skeleton, skinned surface, weights
       locomotion.ts gait solver, two-bone IK, full-body procedural animation
-      city.ts       the block, its canvas textures and the evidence register
+      city.ts       assembles the world, day/night, the evidence register
+      world/        layout.ts   the tilemap, districts, named places
+                    roads.ts    the road network as data, then as geometry
+                    blocks.ts   what fills a city block
+                    builder.ts  merged static geometry, world-scaled UVs
+                    collision.ts uniform grid: collision + line of sight
+                    traffic.ts  lane-following vehicles and signals
+                    crowd.ts    the instanced crowd, and the boats
+                    water.ts    ocean shader, beach, piers, harbour, marina
+                    landmarks.ts the six things you navigate by
+                    skyline.ts  the city you can see but never reach
+                    textures.ts every surface, painted into a canvas
+                    materials.ts one place for batching and day/night
       engine.ts     renderer, camera rig, crowd, post chain, photo capture
     audio.ts        every sound in the OS, synthesised — no audio files
     editorConfig.ts the editor's three vocabularies, tool icons, CDN warm-up
