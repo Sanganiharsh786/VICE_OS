@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { DISPATCH, STATIONS, pick } from "@/lib/copy";
 import { uid, useVice } from "@/lib/store";
 import { AppHeader, Btn, HeatMeter } from "@/components/ui";
+import { sfx } from "@/lib/audio";
 
 type Line = { id: string; t: string; body: string; onYou?: boolean };
 
@@ -27,6 +28,7 @@ export default function Scanner({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     const every = Math.max(2200, 9000 - vice.heat * 62);
     const t = setInterval(() => {
+      sfx.squelch();
       setLog((l) =>
         [...l, { id: uid(), t: stamp(Date.now()), body: pick(DISPATCH) }].slice(-24),
       );

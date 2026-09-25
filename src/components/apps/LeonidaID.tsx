@@ -79,6 +79,7 @@ export default function LeonidaID({ onBack }: { onBack: () => void }) {
           ],
           accent: "lime",
           commitLabel: "ISSUE LICENSE",
+          surface: "license",
         }}
         onCommit={issue}
         onCancel={() => setMode({ k: "form" })}

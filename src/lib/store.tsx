@@ -20,6 +20,7 @@ import {
   type ContractCtx,
   type ContractResult,
 } from "./contracts";
+import { sfx } from "./audio";
 
 export type Comment = {
   id: string;
@@ -431,6 +432,14 @@ export function ViceProvider({ children }: { children: ReactNode }) {
   ]);
 
   const toast = useCallback((t: Omit<Toast, "id">) => {
+    /*
+     * Every consequential event in the game already raises a toast, so this is
+     * the one place that needs to know a sound is due — the apps stay unaware
+     * that the OS makes any noise at all.
+     */
+    if (t.kind === "heat" || t.kind === "alert") sfx.failed();
+    else if (t.kind === "cool") sfx.paid();
+    else sfx.tap();
     const id = uid();
     dispatch({ type: "toast", toast: { ...t, id } });
     setTimeout(() => dispatch({ type: "untoast", id }), 4200);

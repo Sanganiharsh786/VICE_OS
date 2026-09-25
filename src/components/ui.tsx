@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { STAR_STEPS, useVice } from "@/lib/store";
+import { sfx } from "@/lib/audio";
 
 export function Star({ filled, size = 14 }: { filled: boolean; size?: number }) {
   return (
@@ -120,7 +121,10 @@ export function AppHeader({
       }}
     >
       <button
-        onClick={onBack}
+        onClick={() => {
+          sfx.back();
+          onBack();
+        }}
         aria-label="Back to home"
         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 text-white/70 transition hover:border-white/50 hover:text-white"
       >

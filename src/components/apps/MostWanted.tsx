@@ -89,6 +89,7 @@ export default function MostWanted({ onBack }: { onBack: () => void }) {
           ],
           accent: "cyan",
           commitLabel: "SEND TO PRESS",
+          surface: "press",
         }}
         onCommit={(dataUrl) => build(dataUrl)}
         onCancel={() => setMode({ k: "pick" })}

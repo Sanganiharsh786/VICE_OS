@@ -9,6 +9,7 @@ import {
 } from "@/lib/three/engine";
 import { heatTier } from "@/lib/forensics";
 import { tintOf, type Evidence } from "@/lib/evidence";
+import { sfx } from "@/lib/audio";
 
 export type StreetPhoto = {
   src: string;
@@ -116,6 +117,7 @@ export default function StreetMode({
     setBusy(true);
     engine.setAim(true);
     setFlash(true);
+    sfx.shutter();
     setTimeout(() => setFlash(false), 180);
     try {
       const shot = engine.capture();

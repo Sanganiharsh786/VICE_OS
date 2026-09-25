@@ -9,7 +9,7 @@
 import { money } from "./copy";
 
 /** next/font generates hashed family names; grab the real one off :root. */
-function fontVar(name: string, fallback: string) {
+export function fontVar(name: string, fallback: string) {
   if (typeof window === "undefined") return fallback;
   const v = getComputedStyle(document.documentElement)
     .getPropertyValue(name)
@@ -27,7 +27,7 @@ export async function fontsReady() {
   }
 }
 
-function load(src: string): Promise<HTMLImageElement> {
+export function load(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = "anonymous";

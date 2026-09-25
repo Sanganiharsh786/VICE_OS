@@ -52,6 +52,16 @@ body {
   min-height: 0 !important;
 }
 
+/*
+ * The editor's own save/cancel pair, marked by EditorStage once our
+ * translations have renamed them. The OS chrome already carries both, and
+ * showing RUN FORENSICS twice on one screen reads as a bug. Hidden rather
+ * than removed: the commit path clicks this button.
+ */
+.image-lab [data-vice-dupe] {
+  display: none !important;
+}
+
 /* ---------- scrollbars ---------- */
 .vice-scroll {
   scrollbar-width: thin;

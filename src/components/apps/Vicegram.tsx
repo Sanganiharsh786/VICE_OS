@@ -34,7 +34,11 @@ import EditorStage from "@/components/EditorStage";
 import ForensicVision from "@/components/forensic/ForensicVision";
 import ForensicReport from "@/components/forensic/ForensicReport";
 import Consequences, { type Consequence } from "@/components/forensic/Consequences";
-import type { TimelineStep } from "@/components/forensic/useLiveForensics";
+import type {
+  ReelFrame,
+  TimelineStep,
+} from "@/components/forensic/useLiveForensics";
+import { sfx } from "@/lib/audio";
 import { AppHeader, Btn, Chip, Stars, Tally } from "@/components/ui";
 import type { StreetPhoto } from "@/components/apps/StreetMode";
 
@@ -67,6 +71,8 @@ type Scanned = Frame & {
   report: Report;
   /** Edit history observed by the live panel on the way to this export. */
   timeline: TimelineStep[];
+  /** Every settled canvas the panel filmed, for the scrub reel. */
+  reel: ReelFrame[];
   /** What the last scan of this same frame came out at, if there was one. */
   previous?: Attempt;
 };
@@ -114,7 +120,11 @@ export default function Vicegram({
   };
 
   /* ---- editor commit -> the authoritative scan ---- */
-  const onCommit = async (dataUrl: string, timeline: TimelineStep[]) => {
+  const onCommit = async (
+    dataUrl: string,
+    timeline: TimelineStep[],
+    reel: ReelFrame[],
+  ) => {
     if (mode.k !== "edit") return;
     const frame: Frame = {
       src: mode.src,
@@ -146,6 +156,7 @@ export default function Vicegram({
       original: mode.src,
       report,
       timeline,
+      reel,
       previous,
     });
   };
@@ -390,6 +401,7 @@ export default function Vicegram({
               ],
           accent: "pink",
           commitLabel: "RUN FORENSICS",
+          surface: "forensics",
         }}
         onCommit={onCommit}
         onCancel={() => setMode({ k: "roll" })}
@@ -430,6 +442,10 @@ export default function Vicegram({
             evidence={mode.evidence}
             report={mode.report}
             timeline={mode.timeline}
+            reel={mode.reel}
+            alias={vice.alias}
+            title={mode.title}
+            location={mode.location}
             previous={mode.previous}
             heat={heatFor(mode.report, tags, TAGS)}
             onBackToLab={() => backToLab(mode)}
@@ -490,6 +506,7 @@ function modeAsScanned(m: Scanned & { k: string }): Scanned {
     evidence: m.evidence,
     report: m.report,
     timeline: m.timeline,
+    reel: m.reel,
     previous: m.previous,
   };
 }
@@ -662,6 +679,10 @@ function Roll({
 /* ------------------------------------------------------------------ */
 
 function ScanCurtain({ src }: { src: string }) {
+  // The forensic pass sweeping the export.
+  useEffect(() => {
+    sfx.scan();
+  }, []);
   const lines = [
     "hashing export…",
     "comparing against source plate…",

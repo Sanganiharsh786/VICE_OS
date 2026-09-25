@@ -4,9 +4,16 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ImageEditorRef } from "@unlayer/react-image-editor";
 import { heatOf, tintOf, rawExposure, type Evidence } from "@/lib/evidence";
+import {
+  CANCEL_LABELS,
+  editorOptions,
+  SAVE_LABELS,
+  type Surface,
+} from "@/lib/editorConfig";
 import EvidenceBoxes from "@/components/forensic/EvidenceBoxes";
 import {
   useLiveForensics,
+  type ReelFrame,
   type TimelineStep,
 } from "@/components/forensic/useLiveForensics";
 
@@ -30,15 +37,17 @@ function StageSkeleton() {
   );
 }
 
-/** Hoisted so a re-render never hands the editor a fresh options object. */
-const EDITOR_OPTIONS = { theme: "dark" } as const;
-
-/** The editor's own Save control, located by label inside our container. */
+/**
+ * The editor's own Save control, located by the label our `translations` put
+ * on it. Each surface renames it (RUN FORENSICS / SEND TO PRESS / ISSUE
+ * LICENSE), so this matches any of them — and still matches the stock "save"
+ * if a future editor build stops honouring the override.
+ */
 function findSaveButton(root: HTMLElement | null) {
   if (!root) return null;
   return (
-    [...root.querySelectorAll("button")].find(
-      (b) => b.textContent?.trim().toLowerCase() === "save",
+    [...root.querySelectorAll("button")].find((b) =>
+      SAVE_LABELS.includes(b.textContent?.trim().toLowerCase() ?? ""),
     ) ?? null
   );
 }
@@ -52,6 +61,11 @@ export type StageMission = {
   hints: string[];
   accent: "pink" | "cyan" | "lime";
   commitLabel: string;
+  /**
+   * Which in-world machine this is. Drives the editor's own vocabulary and
+   * tool icons through `translations` / `features` — see `lib/editorConfig`.
+   */
+  surface: Surface;
 };
 
 const ACCENTS = {
@@ -95,8 +109,15 @@ export default function EditorStage({
    * is the forensic scan.
    */
   evidence?: Evidence[];
-  /** The export, plus the edit history the live panel observed getting there. */
-  onCommit: (dataUrl: string, timeline: TimelineStep[]) => void;
+  /**
+   * The export, the edit history the live panel observed getting there, and
+   * every settled canvas it filmed on the way.
+   */
+  onCommit: (
+    dataUrl: string,
+    timeline: TimelineStep[],
+    reel: ReelFrame[],
+  ) => void;
   onCancel: () => void;
 }) {
   const ref = useRef<ImageEditorRef>(null);
@@ -105,19 +126,40 @@ export default function EditorStage({
   const [touched, setTouched] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
   const accent = ACCENTS[mission.accent];
+  // Memoised per surface inside editorOptions(), so the identity is stable
+  // across renders and the editor never re-applies its mount options.
+  const options = editorOptions(mission.surface);
 
   const boxed = useMemo(() => evidence.filter((e) => e.box), [evidence]);
   const scored = evidence.length > 0;
 
-  // Poll for unsaved edits so the chrome can reflect the editor's state.
+  /*
+   * Poll for unsaved edits so the chrome can reflect the editor's state — and
+   * while we're in the DOM anyway, mark the editor's own save/cancel pair.
+   *
+   * Teaching the toolbar our vocabulary left RUN FORENSICS on screen twice,
+   * once in the OS chrome and once in the editor's own bar. The chrome's copy
+   * is the one carrying the mission, so the editor's is marked and hidden by a
+   * single CSS rule — the rest of that bar (step back, step forward, layers,
+   * zoom) stays. The button still exists, which matters: `commit()` drives it.
+   */
   useEffect(() => {
     const t = setInterval(() => {
       const e = ref.current?.editor;
-      if (!e) return;
-      try {
-        setTouched(e.hasChanges());
-      } catch {
-        /* editor still booting */
+      if (e) {
+        try {
+          setTouched(e.hasChanges());
+        } catch {
+          /* editor still booting */
+        }
+      }
+      const root = stage.current;
+      if (!root) return;
+      for (const b of root.querySelectorAll("button")) {
+        const text = b.textContent?.trim().toLowerCase() ?? "";
+        if (SAVE_LABELS.includes(text) || CANCEL_LABELS.includes(text)) {
+          b.dataset.viceDupe = "1";
+        }
       }
     }, 900);
     return () => clearInterval(t);
@@ -144,10 +186,10 @@ export default function EditorStage({
   // `commit` is called from the editor's own save handler, which closes over
   // whatever render created it — the timeline is read from a ref so a save
   // always ships the latest history rather than a stale one.
-  const liveRef = useRef(live.timeline);
+  const liveRef = useRef({ timeline: live.timeline, reel: live.reel });
   useEffect(() => {
-    liveRef.current = live.timeline;
-  }, [live.timeline]);
+    liveRef.current = { timeline: live.timeline, reel: live.reel };
+  }, [live.timeline, live.reel]);
 
   /**
    * Hand the edit back to the app.
@@ -161,7 +203,7 @@ export default function EditorStage({
    */
   const commit = (dataUrl?: string | null) => {
     if (dataUrl) {
-      onCommit(dataUrl, liveRef.current);
+      onCommit(dataUrl, liveRef.current.timeline, liveRef.current.reel);
       return;
     }
     const save = findSaveButton(stage.current);
@@ -172,7 +214,25 @@ export default function EditorStage({
     // The editor's markup changed out from under us — fall back to the
     // flattened canvas so the player never gets stuck in the lab.
     const out = ref.current?.editor?.getImage();
-    if (out) onCommit(out, liveRef.current);
+    if (out) onCommit(out, liveRef.current.timeline, liveRef.current.reel);
+  };
+
+  /**
+   * Put the capture back on the canvas without leaving the lab.
+   *
+   * `editor.reset(image)` clears the undo stack and reloads the frame, which
+   * is exactly the "start this one again, the other way" move the whole game
+   * is built around — the player can take a second run at the same photograph
+   * and the report will put both outcomes side by side. Doing it through the
+   * editor rather than by remounting keeps the tool rail, the zoom and the
+   * warmed bundle in place, so the reset is instant.
+   */
+  const reshoot = () => {
+    const e = ref.current?.editor;
+    if (!e) return;
+    void Promise.resolve(e.reset(image)).catch(() => {
+      /* the editor refused — the DISCARD route still works */
+    });
   };
 
   const exposure = rawExposure(evidence);
@@ -222,6 +282,15 @@ export default function EditorStage({
               {railOpen ? "HIDE ✕" : `EVIDENCE ${evidence.length}`}
             </button>
           )}
+          {touched && (
+            <button
+              onClick={reshoot}
+              className="hidden rounded-lg border border-white/15 px-3 py-2 font-mono text-[10px] tracking-[0.2em] text-white/60 transition hover:border-vice-cyan/60 hover:text-vice-cyan sm:block"
+              title="Put the untouched capture back on the canvas and take another run at it"
+            >
+              START OVER
+            </button>
+          )}
           <button
             onClick={onCancel}
             className="rounded-lg border border-white/15 px-3 py-2 font-mono text-[10px] tracking-[0.2em] text-white/60 transition hover:border-white/40 hover:text-white"
@@ -267,7 +336,7 @@ export default function EditorStage({
               // a min-height here would only fight it.
               minHeight={0}
               style={{ height: "100%", width: "100%" }}
-              options={EDITOR_OPTIONS}
+              options={options}
               onLoad={() => setReady(true)}
               onSave={({ dataUrl }) => commit(dataUrl)}
               onCancel={onCancel}

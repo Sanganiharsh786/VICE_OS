@@ -4,6 +4,13 @@ export const alt = "VICE OS — Leonida Live";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
+/**
+ * The card is the same every time, so it can be rendered once at build time —
+ * which is also what lets the whole project come out as a static export for
+ * GitHub Pages.
+ */
+export const dynamic = "force-static";
+
 export default function OpengraphImage() {
   return new ImageResponse(
     (

@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { sfx } from "@/lib/audio";
 import { tintOf, type Evidence } from "@/lib/evidence";
 import type { HeatBreakdown, Report, EvidenceStatus } from "@/lib/forensics";
-import type { TimelineStep } from "./useLiveForensics";
+import type { ReelFrame, TimelineStep } from "./useLiveForensics";
+import ScrubReel from "./ScrubReel";
 import EvidenceBoxes from "./EvidenceBoxes";
 
 const STATUS_TINT: Record<EvidenceStatus, string> = {
@@ -43,6 +45,10 @@ export default function ForensicReport({
   report,
   heat,
   timeline = [],
+  reel = [],
+  alias = "UNKNOWN SUBJECT",
+  title,
+  location,
   previous,
   onBackToLab,
   onPublish,
@@ -54,6 +60,12 @@ export default function ForensicReport({
   heat: HeatBreakdown;
   /** How the frame got here, as observed by the live panel. */
   timeline?: TimelineStep[];
+  /** Every settled canvas the live panel filmed on the way here. */
+  reel?: ReelFrame[];
+  /** Whose reel this is, for the title card. */
+  alias?: string;
+  title?: string;
+  location?: string;
   /** The last scan of this same source frame, if the player has been back. */
   previous?: { scrub: number; heat: number };
   onBackToLab: () => void;
@@ -62,6 +74,32 @@ export default function ForensicReport({
   const scrub = Math.round(report.scrub);
   const shownScrub = Math.round(useCountUp(scrub));
   const hasSubjects = report.findings.length > 0;
+
+  /*
+   * The reel the lab filmed, closed out with the file the scan actually read.
+   *
+   * The live samples come off `getImage()`, which hands back the working
+   * canvas *before* an active filter preset is baked in — so a grade-only edit
+   * films as though nothing moved. Ending the reel on the export, scored by
+   * the authoritative pass, means the last frame is always the truth and the
+   * reel always has a before and an after even if the player worked fast
+   * enough that no mid-edit sample landed.
+   */
+  const finalIdentifiability = hasSubjects
+    ? Math.round(
+        report.findings.reduce((a, f) => a + (100 - f.concealment), 0) /
+          report.findings.length,
+      )
+    : Math.max(0, 100 - scrub);
+
+  const fullReel = [
+    ...(reel.length ? reel : [{ thumb: original, identifiability: 100, at: 0 }]),
+    {
+      thumb: edited,
+      identifiability: finalIdentifiability,
+      at: (reel.at(-1)?.at ?? 0) + 900,
+    },
+  ];
 
   const verdict = report.perfect
     ? { t: "PERFECT SCRUB", c: "#9dff3d", s: "Nothing in this file can be matched to what the lens saw." }
@@ -74,6 +112,12 @@ export default function ForensicReport({
           : scrub > 22
             ? { t: "PARTIALLY SCRUBBED", c: "#22e6ff", s: "Recognisable, but you covered the worst of it." }
             : { t: "RAW FRAME", c: "#ff3b30", s: "Everything in this shot is admissible. Your call." };
+
+  // The verdict lands with a sound the moment the report opens.
+  useEffect(() => {
+    sfx.verdict(report.perfect || (!report.failed && scrub > 40));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const statuses = report.findings.map((f) => f.status);
 
@@ -222,6 +266,21 @@ export default function ForensicReport({
           </p>
         </div>
       )}
+
+      {/* the edit, played back off the measurement log */}
+      <ScrubReel
+        frames={fullReel}
+        meta={{
+          alias,
+          title: title ?? "UNTITLED FRAME",
+          location: location ?? "LEONIDA",
+          scrub,
+          heat: heat.final,
+          subjects: evidence.length,
+          before: original,
+          after: edited,
+        }}
+      />
 
       {/* how the frame got here */}
       {timeline.length > 1 && (

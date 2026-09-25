@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { renderScene } from "@/lib/art";
 import { BOOT_LINES, DISPATCH, money, pick } from "@/lib/copy";
+import { warmUpEditor } from "@/lib/editorConfig";
+import { isMuted, onMuteChange, sfx, toggleMute, unlock } from "@/lib/audio";
 import { useVice } from "@/lib/store";
 import Backdrop from "@/components/Backdrop";
 import Onboarding from "@/components/Onboarding";
@@ -102,6 +104,26 @@ export default function ViceOS() {
     vice.dispatch({ type: "onboarded" });
     if (startJudge) vice.dispatch({ type: "judge", on: true });
   };
+
+  /*
+   * Heat and stars are moved by half a dozen different systems; rather than
+   * teach each of them to make a noise, the shell watches the two numbers that
+   * matter and stings when they move. The ref starts at the hydrated value so
+   * loading a saved session is silent.
+   */
+  const lastHeat = useRef<number | null>(null);
+  const lastStars = useRef<number | null>(null);
+  useEffect(() => {
+    if (!vice.ready) return;
+    if (lastHeat.current !== null && vice.heat !== lastHeat.current) {
+      sfx.heat(vice.heat - lastHeat.current);
+    }
+    if (lastStars.current !== null && vice.starCount > lastStars.current) {
+      sfx.starUp();
+    }
+    lastHeat.current = vice.heat;
+    lastStars.current = vice.starCount;
+  }, [vice.ready, vice.heat, vice.starCount]);
 
   // Beats the shell itself can see. The rest are reported by the apps.
   useEffect(() => {
@@ -242,6 +264,7 @@ function StatusBar() {
         >
           {heat}°
         </span>
+        <MuteToggle />
         <span className="text-[11px] text-white/60">▮</span>
       </div>
     </div>
@@ -305,6 +328,16 @@ function ContractHUD({
 
 function Boot({ onDone }: { onDone: () => void }) {
   const [i, setI] = useState(0);
+
+  /*
+   * The boot sequence is ~2s of typing on the compositor, which is dead time
+   * on the network. Spend it pulling the Image Lab's bundle down so the first
+   * press of EDIT opens on a canvas rather than the darkroom skeleton.
+   */
+  useEffect(() => {
+    warmUpEditor();
+  }, []);
+
   useEffect(() => {
     if (i >= BOOT_LINES.length) {
       const t = setTimeout(onDone, 550);
@@ -336,6 +369,25 @@ function Boot({ onDone }: { onDone: () => void }) {
   );
 }
 
+/** Every sound in the OS is synthesised; this is the only control over them. */
+function MuteToggle() {
+  // The audio engine lives outside React; this is the standard way to read it
+  // without an effect writing state on mount.
+  const off = useSyncExternalStore(onMuteChange, isMuted, () => false);
+  return (
+    <button
+      onClick={() => {
+        unlock();
+        toggleMute();
+      }}
+      aria-label={off ? "Unmute" : "Mute"}
+      className="font-mono text-[10px] leading-none text-white/45 transition hover:text-white"
+    >
+      {off ? "♪̸" : "♪"}
+    </button>
+  );
+}
+
 function Lock({
   wallpaper,
   onUnlock,
@@ -346,7 +398,12 @@ function Lock({
   const { alias, heat, bountyValue } = useVice();
   return (
     <button
-      onClick={onUnlock}
+      onClick={() => {
+        // Browsers hold the AudioContext until a real gesture; this is it.
+        unlock();
+        sfx.boot();
+        onUnlock();
+      }}
       className="group relative flex h-full w-full flex-col justify-between p-6 text-left"
     >
       {wallpaper && (
@@ -503,7 +560,10 @@ function Home({
           {APPS.map((a) => (
             <button
               key={a.id}
-              onClick={() => onOpen(a.id)}
+              onClick={() => {
+              sfx.select();
+              onOpen(a.id);
+            }}
               className={`group rounded-2xl border border-white/10 bg-black/40 p-3 text-left transition hover:-translate-y-0.5 hover:border-white/30 ${
                 "wide" in a && a.wide ? "col-span-2 flex items-center gap-3" : ""
               }`}
