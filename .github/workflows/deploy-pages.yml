@@ -27,6 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Runs before the build, not after it: if Pages isn't set up this is the
+      # step that says so, and there's no reason to spend a build finding out.
+      # `enablement` turns Pages on for the repository the first time through,
+      # so a fresh clone deploys without anyone opening Settings by hand.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -35,16 +43,13 @@ jobs:
       - run: npm ci
 
       - name: Build the static export
-        # `${{ github.event.repository.name }}` is the sub-path Pages serves
-        # this repo from, e.g. /vice-os.
-        env:
-          PAGES_BASE_PATH: /${{ github.event.repository.name }}
-        run: npm run build
+        # The sub-path Pages serves this repo from, e.g. /VICE_OS. Taken from
+        # GITHUB_REPOSITORY ("owner/repo") rather than the event payload, which
+        # isn't guaranteed to carry the repository object on every trigger.
+        run: PAGES_BASE_PATH="/${GITHUB_REPOSITORY#*/}" npm run build
 
       - name: Stop Pages from running the export through Jekyll
         run: touch out/.nojekyll
-
-      - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
