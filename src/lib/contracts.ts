@@ -48,6 +48,12 @@ export type Objective = {
   test: (c: ContractCtx) => boolean;
   /** 0..1 for the live meter; undefined when it's pass/fail only. */
   progress?: (c: ContractCtx) => number;
+  /**
+   * Reads `findings`, so only a frame shot in Leonida Live can satisfy it —
+   * painted camera-roll scenes carry no subject rectangles. THE FIXER uses
+   * this to send the player to the street instead of the film roll.
+   */
+  street?: true;
 };
 
 export type Tier = "LOW" | "MID" | "HIGH";
@@ -201,6 +207,7 @@ const obj = {
     tool: "LEONIDA LIVE → get close before the shutter",
     test: (c) => (c.findings?.length ?? 0) >= n,
     progress: (c) => pct(c.findings?.length ?? 0, n),
+    street: true,
   }),
   hideAll: (): Objective => ({
     label: "Leave nothing identifiable in the export",
@@ -210,6 +217,7 @@ const obj = {
       c.findings?.length
         ? c.findings.filter(gone).length / c.findings.length
         : 0,
+    street: true,
   }),
   hideKind: (kind: string): Objective => ({
     label: `Hide every ${kind.toLowerCase()} in the frame`,
@@ -222,11 +230,13 @@ const obj = {
       const of = c.findings?.filter((f) => f.kind === kind) ?? [];
       return of.length ? of.filter(gone).length / of.length : 0;
     },
+    street: true,
   }),
   keepKind: (kind: string): Objective => ({
     label: `Keep a ${kind.toLowerCase()} clearly readable`,
     tool: `shoot a ${kind.toLowerCase()} and do NOT cover it`,
     test: (c) => Boolean(c.findings?.some((f) => f.kind === kind && readable(f))),
+    street: true,
   }),
   bounty: (n: number): Objective => ({
     label: `Print a bulletin worth $${n.toLocaleString()} or more`,
@@ -475,6 +485,15 @@ export function rollBoard(env: BoardEnv): Contract[] {
 
 export function evaluate(contract: Contract, ctx: ContractCtx) {
   return contract.objectives.map((o) => o.test(ctx));
+}
+
+/**
+ * Does this job need a frame shot in Leonida Live? If so, sending the player
+ * to the film roll is sending them somewhere the job cannot be completed, so
+ * THE FIXER points at the street instead.
+ */
+export function needsStreet(contract: Contract) {
+  return contract.objectives.some((o) => o.street);
 }
 
 export const TIER_TINT: Record<Tier, string> = {

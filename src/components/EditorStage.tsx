@@ -100,6 +100,7 @@ export default function EditorStage({
   evidence = EMPTY_EVIDENCE,
   onCommit,
   onCancel,
+  onFirstEdit,
   onStreet,
 }: {
   image: string;
@@ -120,6 +121,12 @@ export default function EditorStage({
     reel: ReelFrame[],
   ) => void;
   onCancel: () => void;
+  /**
+   * Fires once, the first time the editor reports an unsaved change. The
+   * guided card uses it to tick "cover the evidence" while the player is still
+   * in the lab rather than several screens later.
+   */
+  onFirstEdit?: () => void;
   /**
    * Present when this frame came in from Leonida Live. The lab is a full-screen
    * stage with no phone chrome around it, so without this the only way back to
@@ -151,12 +158,24 @@ export default function EditorStage({
    * single CSS rule — the rest of that bar (step back, step forward, layers,
    * zoom) stays. The button still exists, which matters: `commit()` drives it.
    */
+  // Held in a ref so announcing the first edit never restarts the poll.
+  const firstEdit = useRef(onFirstEdit);
+  const announced = useRef(false);
+  useEffect(() => {
+    firstEdit.current = onFirstEdit;
+  }, [onFirstEdit]);
+
   useEffect(() => {
     const t = setInterval(() => {
       const e = ref.current?.editor;
       if (e) {
         try {
-          setTouched(e.hasChanges());
+          const changed = e.hasChanges();
+          setTouched(changed);
+          if (changed && !announced.current) {
+            announced.current = true;
+            firstEdit.current?.();
+          }
         } catch {
           /* editor still booting */
         }

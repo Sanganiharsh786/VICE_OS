@@ -475,6 +475,8 @@ export function ViceProvider({ children }: { children: ReactNode }) {
       contract: c,
       deadline: Date.now() + c.seconds * 1000,
     });
+    // Taking the job is the beat — merely opening THE FIXER is not.
+    dispatch({ type: "beat", beat: "fixer" });
   }, []);
 
   const settle = useCallback(

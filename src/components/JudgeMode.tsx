@@ -8,24 +8,42 @@ import { BEATS, useVice } from "@/lib/store";
  * next and ticks off each beat as the apps report it, so nobody has to hunt
  * through menus to find the part that matters.
  */
-export default function JudgeMode({ onJump }: { onJump: (id: string) => void }) {
+/**
+ * Which app each beat happens in, so the card can take you there.
+ *
+ * Only the first beat of a stretch names a destination. Everything from
+ * FORENSIC VISION to publishing happens inside the one camera app the player
+ * is already standing in, so those beats point at `vicegram` and the card
+ * quietly drops its button rather than bouncing them out of a live edit.
+ */
+export type JudgeTarget = "contracts" | "street" | "vicegram" | "wanted";
+
+const JUMP: Record<string, JudgeTarget> = {
+  fixer: "contracts",
+  shot: "street",
+  vision: "vicegram",
+  edit: "vicegram",
+  report: "vicegram",
+  post: "vicegram",
+  wanted: "wanted",
+};
+
+export default function JudgeMode({
+  current,
+  onJump,
+}: {
+  /** The screen showing right now, so the card can tell "go" from "you're here". */
+  current: string;
+  onJump: (id: JudgeTarget) => void;
+}) {
   const { beats, judge, dispatch } = useVice();
   if (!judge) return null;
 
   const nextIndex = BEATS.findIndex((b) => !beats.includes(b.id));
   const done = nextIndex === -1;
   const next = done ? null : BEATS[nextIndex];
-
-  /** Which app each beat happens in, so the card can take you there. */
-  const JUMP: Record<string, string> = {
-    fixer: "contracts",
-    shot: "street",
-    vision: "street",
-    edit: "street",
-    report: "street",
-    post: "street",
-    wanted: "wanted",
-  };
+  const target = next ? JUMP[next.id] : null;
+  const here = target === current;
 
   return (
     <div className="pointer-events-auto relative z-30 mx-3 mb-1 rounded-xl border border-vice-lime/40 bg-black/70 p-2.5 backdrop-blur-xl">
@@ -53,12 +71,18 @@ export default function JudgeMode({ onJump }: { onJump: (id: string) => void }) 
             {next!.label}
           </p>
           <div className="mt-2 flex items-center gap-2">
-            <button
-              onClick={() => onJump(JUMP[next!.id])}
-              className="rounded-lg bg-vice-lime px-2.5 py-1 font-mono text-[9px] font-bold tracking-[0.14em] text-vice-void transition hover:brightness-110"
-            >
-              TAKE ME THERE →
-            </button>
+            {here ? (
+              <span className="shrink-0 rounded-lg border border-vice-lime/40 px-2.5 py-1 font-mono text-[9px] tracking-[0.14em] text-vice-lime/70">
+                YOU&apos;RE HERE
+              </span>
+            ) : (
+              <button
+                onClick={() => onJump(target!)}
+                className="rounded-lg bg-vice-lime px-2.5 py-1 font-mono text-[9px] font-bold tracking-[0.14em] text-vice-void transition hover:brightness-110"
+              >
+                TAKE ME THERE →
+              </button>
+            )}
             <div className="flex flex-1 gap-1">
               {BEATS.map((b) => (
                 <span

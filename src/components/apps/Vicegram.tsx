@@ -94,36 +94,78 @@ type Mode =
   | { k: "aftermath"; steps: Consequence[] }
   | { k: "feed" };
 
+/**
+ * Stages that hold work the player would lose if something yanked them
+ * elsewhere. An external jump is a request, and these decline it.
+ */
+const BUSY: Mode["k"][] = ["vision", "edit", "scan", "report", "compose"];
+
 export default function Vicegram({
   onBack,
-  startInStreet = false,
+  request,
+  onBusy,
 }: {
   onBack: () => void;
-  startInStreet?: boolean;
+  /**
+   * A stage the OS was asked to open this app at, carrying a nonce so the same
+   * ask twice still lands. Honoured only when nothing is mid-edit — the point
+   * of routing it as a request rather than a remount is that a frame halfway
+   * through the Image Lab survives somebody pressing a shortcut.
+   */
+  request: { stage: "street" | "roll"; n: number };
+  /** Tells the OS to keep this app alive while it is holding unfinished work. */
+  onBusy: (busy: boolean) => void;
 }) {
   const vice = useVice();
   const shots = useCameraRoll();
-  const [mode, setMode] = useState<Mode>(
-    startInStreet ? { k: "street" } : { k: "roll" },
-  );
+  const [mode, setMode] = useState<Mode>({ k: request.stage });
   const [caption, setCaption] = useState("");
   const [tags, setTags] = useState<string[]>(["#leonidalive"]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const hasPosts = vice.posts.length > 0;
 
-  /* ---- the shutter hands straight to forensic vision ---- */
-  const onShoot = (photo: StreetPhoto) => {
-    const frame: Frame = {
-      src: photo.src,
-      title: photo.title,
-      location: photo.location,
-      evidence: photo.evidence,
-      fromStreet: true,
-    };
-    vice.dispatch({ type: "captured", frame });
+  /*
+   * Honour an external jump the moment the prop changes — React's documented
+   * "adjust state when a prop changes" pattern rather than an effect, so the
+   * player never sees a frame of the stage they were being moved off. A stage
+   * holding live work declines the request outright.
+   */
+  const [served, setServed] = useState(request.n);
+  if (served !== request.n) {
+    setServed(request.n);
+    if (!BUSY.includes(mode.k)) setMode({ k: request.stage });
+  }
+
+  const busy = BUSY.includes(mode.k);
+  useEffect(() => {
+    onBusy(busy);
+  }, [busy, onBusy]);
+
+  /**
+   * The back arrow is the one exit that means "I'm done with this frame" —
+   * anything else (the contract clock, a guided jump) is a detour the app is
+   * expected to survive. Standing down before leaving is what lets the OS
+   * unmount this, so the next visit opens on the film roll.
+   */
+  const leave = () => {
+    setMode({ k: "roll" });
+    onBusy(false);
+    onBack();
+  };
+
+  /* ---- the shutter banks the frame; it does not eject you ---- */
+  const onCapture = (photo: StreetPhoto) => {
+    vice.dispatch({
+      type: "captured",
+      frame: { ...photo, sceneId: undefined },
+    });
     vice.mark("shot");
-    setMode({ k: "vision", ...frame });
+  };
+
+  /* ---- picking one off the roll hands it to forensic vision ---- */
+  const onOpenShot = (photo: StreetPhoto) => {
+    setMode({ k: "vision", ...photo, fromStreet: true });
   };
 
   /* ---- editor commit -> the authoritative scan ---- */
@@ -224,7 +266,6 @@ export default function Vicegram({
 
     vice.dispatch({ type: "post", post });
     vice.mark("post");
-    if (report.scrub > 20) vice.mark("edit");
     if (heatDelta > 10) vice.dispatch({ type: "crime", crime: pick(CRIMES) });
 
     // If a contract is live, this post is the delivery.
@@ -355,8 +396,10 @@ export default function Vicegram({
     return (
       <StreetMode
         heat={vice.heat}
+        roll={vice.captured}
         onExit={() => setMode({ k: "roll" })}
-        onShoot={onShoot}
+        onCapture={onCapture}
+        onOpen={onOpenShot}
       />
     );
   }
@@ -415,6 +458,7 @@ export default function Vicegram({
           surface: "forensics",
         }}
         onCommit={onCommit}
+        onFirstEdit={() => vice.mark("edit")}
         onStreet={mode.fromStreet ? () => setMode({ k: "street" }) : undefined}
         onCancel={() => setMode(mode.fromStreet ? { k: "street" } : { k: "roll" })}
       />
@@ -426,7 +470,7 @@ export default function Vicegram({
       <AppHeader
         title="VICEGRAM"
         sub={`${vice.handle} · ${vice.followers.toLocaleString()} FOLLOWERS`}
-        onBack={onBack}
+        onBack={leave}
         right={<Stars count={vice.starCount} size={12} />}
       />
 

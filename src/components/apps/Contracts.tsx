@@ -2,11 +2,17 @@
 
 import { useSyncExternalStore } from "react";
 import { money } from "@/lib/copy";
-import { CATEGORY_NOTE, rankFor, TIER_TINT, type Contract } from "@/lib/contracts";
+import {
+  CATEGORY_NOTE,
+  needsStreet,
+  rankFor,
+  TIER_TINT,
+  type Contract,
+} from "@/lib/contracts";
 import { useVice } from "@/lib/store";
 import { AppHeader, Btn, Tally } from "@/components/ui";
 
-export type JumpTarget = "vicegram" | "wanted";
+export type JumpTarget = "vicegram" | "wanted" | "street";
 
 export default function Contracts({
   onBack,
@@ -276,18 +282,30 @@ function ActiveJob({ onJump }: { onJump: (t: JumpTarget) => void }) {
         ))}
       </ul>
 
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <Btn
-          tone={c.event === "poster" ? "cyan" : "solid"}
-          full
-          onClick={() => onJump(c.event === "poster" ? "wanted" : "vicegram")}
-        >
-          {c.event === "poster" ? "OPEN MOST WANTED" : "OPEN VICEGRAM"}
-        </Btn>
-        <Btn tone="ghost" full onClick={vice.abandon}>
-          WALK AWAY
-        </Btn>
-      </div>
+      {/*
+        Where this job actually gets done. Objectives built on per-subject
+        findings can only be satisfied by a frame shot in Leonida Live, so
+        those send the player to the street rather than to the film roll.
+      */}
+      {(() => {
+        const target: JumpTarget =
+          c.event === "poster" ? "wanted" : needsStreet(c) ? "street" : "vicegram";
+        const label = {
+          wanted: "OPEN MOST WANTED",
+          street: "GO SHOOT IT — LEONIDA LIVE",
+          vicegram: "OPEN VICEGRAM",
+        }[target];
+        return (
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <Btn tone={target === "wanted" ? "cyan" : "solid"} full onClick={() => onJump(target)}>
+              {label}
+            </Btn>
+            <Btn tone="ghost" full onClick={vice.abandon}>
+              WALK AWAY
+            </Btn>
+          </div>
+        );
+      })()}
 
       <p className="mt-3 text-center font-mono text-[9px] leading-relaxed tracking-[0.14em] text-white/30">
         THE FORENSIC SCAN OF YOUR EXPORT IS THE SCORE.

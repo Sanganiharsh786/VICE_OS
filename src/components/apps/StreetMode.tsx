@@ -80,18 +80,27 @@ const KEYS: [string, string][] = [
  * and whatever the shutter catches becomes the frame you take into the Image
  * Lab — including a list of everything identifiable that was in it.
  *
- * Shots now collect into a film roll rather than ejecting you to the editor on
- * the first press, so a trip across the city can come back with a set to
- * choose from.
+ * Shots collect into a film roll rather than ejecting you to the editor on the
+ * first press, so a trip across the city can come back with a set to choose
+ * from. That roll lives in the store, not here: every frame is banked the
+ * moment the shutter fires, so walking out of the street — or stepping back
+ * into it from the lab — never costs the player a photograph.
  */
 export default function StreetMode({
   heat,
+  roll,
   onExit,
-  onShoot,
+  onCapture,
+  onOpen,
 }: {
   heat: number;
+  /** Everything shot this session, newest first. Owned by the store. */
+  roll: StreetPhoto[];
   onExit: () => void;
-  onShoot: (photo: StreetPhoto) => void;
+  /** The shutter fired and the frame developed. Bank it. */
+  onCapture: (photo: StreetPhoto) => void;
+  /** The player picked a frame off the roll to take into the Image Lab. */
+  onOpen: (photo: StreetPhoto) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -104,7 +113,6 @@ export default function StreetMode({
   const [flash, setFlash] = useState(false);
   const [busy, setBusy] = useState(false);
   const [quality, setQuality] = useState<Quality>("high");
-  const [roll, setRoll] = useState<StreetPhoto[]>([]);
   const [showKeys, setShowKeys] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -180,17 +188,19 @@ export default function StreetMode({
     try {
       const shot = engine.capture();
       const src = await developPhoto(shot.dataUrl, shot.title, shot.location);
-      setRoll((r) => [
-        { src, title: shot.title, location: shot.location, evidence: shot.evidence },
-        ...r,
-      ].slice(0, 12));
+      onCapture({
+        src,
+        title: shot.title,
+        location: shot.location,
+        evidence: shot.evidence,
+      });
       setToast(`FRAME SAVED · ${shot.location}`);
     } catch (err) {
       console.error("[vice-os] capture:", err);
     } finally {
       setBusy(false);
     }
-  }, [busy]);
+  }, [busy, onCapture]);
 
   /* ---------------- keys that belong to the UI, not the engine ---------------- */
   useEffect(() => {
@@ -453,7 +463,7 @@ export default function StreetMode({
               <button
                 key={`${p.title}-${i}`}
                 data-roll-shot
-                onClick={() => onShoot(p)}
+                onClick={() => onOpen(p)}
                 aria-label={`Open ${p.title} in the Image Lab`}
                 className="group relative h-20 w-16 shrink-0 overflow-hidden rounded-md border border-white/25 transition hover:border-vice-cyan"
                 title={`${p.title} — open in the Image Lab`}

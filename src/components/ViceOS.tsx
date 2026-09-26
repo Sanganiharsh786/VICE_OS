@@ -25,8 +25,21 @@ type Screen =
   | "wanted"
   | "id"
   | "scanner"
-  | "contracts"
-  | "street";
+  | "contracts";
+
+/**
+ * What the home grid, JUDGE MODE and THE FIXER are allowed to ask for.
+ *
+ * LEONIDA LIVE is a *stage inside* VICEGRAM, not a screen of its own. It used
+ * to be rendered from a second slot, which meant every trip between the street
+ * and the film roll unmounted the camera app and threw away whatever frame was
+ * mid-edit. Everything now goes through `go()`, which keeps one Vicegram
+ * mounted and hands it the stage as a request it can decline.
+ */
+type Target = Screen | "street";
+
+/** A stage VICEGRAM was asked to open at. The nonce makes a repeat ask land. */
+export type CameraRequest = { stage: "street" | "roll"; n: number };
 
 const APPS = [
   {
@@ -84,6 +97,14 @@ const APPS = [
 export default function ViceOS() {
   const vice = useVice();
   const [screen, setScreen] = useState<Screen>("boot");
+  const [camera, setCamera] = useState<CameraRequest>({ stage: "roll", n: 0 });
+  /**
+   * True while the camera app is holding work — a frame in the lab, a report
+   * not yet published. The contract clock is deliberately reachable from every
+   * app, so stepping out to THE FIXER and back has to be survivable; while
+   * this is set the app stays mounted and is merely hidden.
+   */
+  const [camBusy, setCamBusy] = useState(false);
   const [wallpaper, setWallpaper] = useState<string | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const [introReplay, setIntroReplay] = useState(false);
@@ -97,6 +118,21 @@ export default function ViceOS() {
   const intro =
     introReplay ||
     (!introDismissed && vice.ready && !vice.onboarded && screen !== "boot");
+
+  /**
+   * The one way to change screens. Asking for the camera app — from the home
+   * grid, from a contract, or from the guided card — raises a request rather
+   * than remounting it, so a frame that is halfway through the lab survives
+   * the jump. Vicegram ignores the request while an edit is in flight.
+   */
+  const go = (t: Target) => {
+    if (t === "street" || t === "vicegram") {
+      setCamera((c) => ({ stage: t === "street" ? "street" : "roll", n: c.n + 1 }));
+      setScreen("vicegram");
+      return;
+    }
+    setScreen(t);
+  };
 
   const closeIntro = (startJudge: boolean) => {
     setIntroDismissed(true);
@@ -125,9 +161,12 @@ export default function ViceOS() {
     lastStars.current = vice.starCount;
   }, [vice.ready, vice.heat, vice.starCount]);
 
-  // Beats the shell itself can see. The rest are reported by the apps.
+  /*
+   * The one beat the shell itself can see. The rest are reported by the apps
+   * at the moment the player actually does the thing — opening an app is not
+   * the same as doing its job, which is why "fixer" now ticks inside accept().
+   */
   useEffect(() => {
-    if (screen === "contracts") vice.mark("fixer");
     if (screen === "wanted" && vice.posts.length > 0) vice.mark("wanted");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, vice.posts.length]);
@@ -155,7 +194,7 @@ export default function ViceOS() {
           hud={
             screen !== "boot" && screen !== "lock" ? (
               <>
-                <JudgeMode onJump={(id) => setScreen(id as Screen)} />
+                <JudgeMode current={screen} onJump={go} />
                 <ContractHUD
                   active={screen === "contracts"}
                   onOpen={() => setScreen("contracts")}
@@ -171,23 +210,34 @@ export default function ViceOS() {
           {screen === "home" && (
             <Home
               wallpaper={wallpaper}
-              onOpen={(id) => setScreen(id)}
+              onOpen={go}
               onLock={() => setScreen("lock")}
               onIntro={() => setIntroReplay(true)}
             />
           )}
-          {screen === "vicegram" && <Vicegram onBack={() => setScreen("home")} />}
-          {screen === "street" && (
-            <Vicegram onBack={() => setScreen("home")} startInStreet />
+          {/*
+            One slot, one mount. LEONIDA LIVE arrives as a request on `camera`
+            rather than as a second element, so walking out to the street and
+            back never costs the player the frame they were working on — and
+            while the app is holding work it is hidden rather than unmounted,
+            so a detour to another app survives too. Vicegram drops `busy`
+            itself when the player presses back, which is the one exit that
+            does mean "I'm finished with this frame".
+          */}
+          {(screen === "vicegram" || camBusy) && (
+            <div className={screen === "vicegram" ? "contents" : "hidden"}>
+              <Vicegram
+                onBack={() => setScreen("home")}
+                request={camera}
+                onBusy={setCamBusy}
+              />
+            </div>
           )}
           {screen === "wanted" && <MostWanted onBack={() => setScreen("home")} />}
           {screen === "id" && <LeonidaID onBack={() => setScreen("home")} />}
           {screen === "scanner" && <Scanner onBack={() => setScreen("home")} />}
           {screen === "contracts" && (
-            <Contracts
-              onBack={() => setScreen("home")}
-              onJump={(t) => setScreen(t)}
-            />
+            <Contracts onBack={() => setScreen("home")} onJump={go} />
           )}
 
           <Toasts />
@@ -472,7 +522,7 @@ function Home({
   onIntro,
 }: {
   wallpaper: string | null;
-  onOpen: (id: Screen) => void;
+  onOpen: (id: Target) => void;
   onLock: () => void;
   onIntro: () => void;
 }) {
@@ -602,8 +652,8 @@ function Home({
           {posts.length === 0 ? (
             <p className="mt-2 text-[12px] leading-snug text-white/50">
               Nothing on the record yet. Open{" "}
-              <span className="text-vice-pink">VICEGRAM</span>, pick a shot, and see
-              what the image lab does to your reputation.
+              <span className="text-vice-cyan">LEONIDA LIVE</span>, go shoot
+              something, and see what the image lab does to your reputation.
             </p>
           ) : (
             <div className="mt-2 flex gap-2 overflow-x-auto no-scrollbar">
