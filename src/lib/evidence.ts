@@ -24,6 +24,13 @@ export const EVIDENCE_HEAT: Record<string, number> = {
   PLATE: 6,
   LANDMARK: 5,
   CONTRABAND: 12,
+  /*
+   * An advertising board is the cheapest thing in the register and still worth
+   * something: the campaign running on it dates the photograph to the week, and
+   * the board itself places it on a named street. Low, because it is the one
+   * piece of evidence you can almost always crop out.
+   */
+  BILLBOARD: 3,
 };
 
 export const EVIDENCE_TINT: Record<string, string> = {
@@ -31,6 +38,7 @@ export const EVIDENCE_TINT: Record<string, string> = {
   PLATE: "#22e6ff",
   LANDMARK: "#ffb347",
   CONTRABAND: "#ff3b30",
+  BILLBOARD: "#9dff3d",
 };
 
 export function heatOf(kind: string) {

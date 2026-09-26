@@ -3,8 +3,8 @@
  *
  * Two reasons it lives here rather than beside the geometry that uses it:
  * materials are the unit of batching (one material = one draw call for all the
- * geometry welded into it), and the day/night cycle needs a single list to
- * walk when it retunes window glow, neon and road sheen at dusk.
+ * geometry welded into it), and the emissive ones need to be walkable as a
+ * single list, because `city.ts` sets the glow on all of them in one pass.
  *
  * Note the complete absence of point lights. The old block put a PointLight
  * behind every neon sign, which meant every material in the scene recompiled
@@ -36,7 +36,7 @@ export function buildMaterials(tex: TextureLib) {
     return m;
   };
 
-  /** Materials whose emissive tracks the time of day. */
+  /** Materials whose emissive is set from the city's one lighting setup. */
   const emissives: THREE.MeshStandardMaterial[] = [];
   const glowing = <T extends THREE.MeshStandardMaterial>(m: T) => {
     emissives.push(m);

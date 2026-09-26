@@ -39,11 +39,13 @@ import {
 } from "./world/water";
 import { buildLandmarks } from "./world/landmarks";
 import { buildSkyline } from "./world/skyline";
-import { Traffic, VEHICLES, type SignalHead } from "./world/traffic";
+import { Traffic, VEHICLES } from "./world/traffic";
+import type { SignalLamp } from "./world/signals";
+import { buildAds } from "./world/ads";
 import { Boats, Crowd } from "./world/crowd";
 import { EXTENT, GRID, LANDMARK_SPOTS } from "./world/layout";
 import { mulberry } from "./world/rng";
-import type { EvidenceTag } from "./world/types";
+import type { AdSite, EvidenceTag } from "./world/types";
 
 export type { EvidenceTag, EvidenceKind } from "./world/types";
 export type { Collider } from "./world/collision";
@@ -60,15 +62,6 @@ export type City = {
   sun: THREE.DirectionalLight;
   /** Where the player starts: the seafront, looking into the city. */
   spawn: { x: number; z: number; yaw: number };
-  /** 0..1 through the day. Sunset is the look the city is designed around. */
-  timeOfDay: number;
-  setTimeOfDay: (t: number) => void;
-  /** Pinned lighting, or "auto" to let the clock run. */
-  timeMode: TimeMode;
-  setTimeMode: (mode: TimeMode) => TimeMode;
-  cycleTimeMode: () => TimeMode;
-  /** 0 = broad daylight, 1 = full night. Drives headlights and neon. */
-  nightness: number;
   update: (
     dt: number,
     t: number,
@@ -111,11 +104,49 @@ export type City = {
   groundAt: (x: number, z: number, clearTop: number) => number;
   /** The same, but ignoring traffic: what a pedestrian will stand on. */
   walkableAt: (x: number, z: number, clearTop: number) => number;
-  stats: { buildings: number; colliders: number; draws: number };
+  stats: { buildings: number; colliders: number; draws: number; ads: number };
   dispose: () => void;
 };
 
 export const CITY_BOUNDS = { extent: EXTENT };
+
+/* ------------------------------------------------------------------ */
+/* light                                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Leonida's one and only light.
+ *
+ * This used to be an eight-stop palette, a running clock and three pinnable
+ * modes, and every frame re-sampled the lot and rewrote the sky uniforms, the
+ * fog, the ocean and the emissive intensity of every material in the city. The
+ * city is late morning now and it stays there, so all of that is a single
+ * constant applied once at build time — no interpolation, no per-frame work,
+ * and no way for the world to end up somewhere dark.
+ *
+ * `signage` is the part worth explaining. Shop signs and neon are additive
+ * geometry, so in daylight they read as faint washes rather than as light. They
+ * are held a little higher than physics would ask for, because Leonida's
+ * frontages *are* its character, and the advertising boards — which are opaque
+ * and self-lit — now carry the job of being the brightest thing in frame.
+ */
+const DAY = {
+  zen: "#215cb4",
+  hor: "#8ec6e8",
+  gnd: "#e4eef6",
+  sun: "#fff2dc",
+  /** Directional intensity, and the hemisphere bounce under it. */
+  si: 2.42,
+  hemi: 2.85,
+  fog: "#aacbe0",
+  /** Exponential fog density — daytime haze over a coastal city. */
+  fd: 0.00135,
+  /** High and a little to the east, so the grid casts usable shadows. */
+  sunDir: new THREE.Vector3(0.34, 0.9, -0.42).normalize(),
+  /** Emissive floor for lit windows, and the opacity of the additive signage. */
+  glow: 0.24,
+  signage: { neon: 0.4, sign: 0.42, pool: 0.05 },
+};
 
 /* ------------------------------------------------------------------ */
 /* sky                                                                 */
@@ -128,11 +159,10 @@ function buildSky() {
     depthWrite: false,
     fog: false,
     uniforms: {
-      sunDir: { value: new THREE.Vector3(0.6, 0.2, -0.7) },
-      zenith: { value: new THREE.Color("#140a32") },
-      horizon: { value: new THREE.Color("#6d1d63") },
-      ground: { value: new THREE.Color("#ff8a4c") },
-      night: { value: 1 },
+      sunDir: { value: DAY.sunDir.clone() },
+      zenith: { value: new THREE.Color(DAY.zen) },
+      horizon: { value: new THREE.Color(DAY.hor) },
+      ground: { value: new THREE.Color(DAY.gnd) },
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
@@ -143,14 +173,7 @@ function buildSky() {
     `,
     fragmentShader: /* glsl */ `
       uniform vec3 sunDir; uniform vec3 zenith; uniform vec3 horizon; uniform vec3 ground;
-      uniform float night;
       varying vec3 vDir;
-
-      float hash(vec3 p){
-        p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
-        p *= 17.0;
-        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
-      }
 
       void main(){
         vec3 d = normalize(vDir);
@@ -161,15 +184,8 @@ function buildSky() {
 
         // the sun, and the glow it throws along the horizon behind it
         float sd = max(dot(d, normalize(sunDir)), 0.0);
-        col += horizon * pow(sd, 6.0) * 0.55;
-        col += vec3(1.0, 0.82, 0.55) * pow(sd, 260.0) * 2.6;
-
-        // stars, fading in with the night and cut off below the horizon
-        if (night > 0.02 && d.y > -0.02) {
-          float s = hash(floor(d * 320.0));
-          float star = smoothstep(0.9975, 1.0, s) * smoothstep(0.0, 0.25, d.y);
-          col += vec3(0.85, 0.9, 1.0) * star * night * 2.2;
-        }
+        col += horizon * pow(sd, 6.0) * 0.30;
+        col += vec3(1.0, 0.94, 0.82) * pow(sd, 340.0) * 2.2;
         gl_FragColor = vec4(col, 1.0);
       }
     `,
@@ -178,75 +194,6 @@ function buildSky() {
   mesh.frustumCulled = false;
   mesh.renderOrder = -3;
   return { mesh, mat, geo };
-}
-
-/**
- * Keyframes for the sky, sun, fog and how lit the city's windows are.
- *
- * `fd` is the exponential fog density, and it is lowest at night on purpose.
- * Night air is clearer than daytime haze, and dark fog does nothing except
- * flatten the city into grey — the thing you actually want to see after dark is
- * the neon two blocks away, which needs the air to be clear to reach you.
- */
-const PALETTE = [
-  // [tod, zenith, horizon, ground, sunColour, sunIntensity, hemi, fog, fogDensity, nightness]
-  { t: 0.0, zen: "#040611", hor: "#120a2e", gnd: "#241344", sun: "#3a4a8a", si: 0.2, hemi: 0.62, fog: "#0d0a22", fd: 0.00055, night: 1 },
-  { t: 0.22, zen: "#0d1636", hor: "#5a2a5e", gnd: "#d86a4a", sun: "#ff9a5c", si: 0.7, hemi: 1.3, fog: "#3a1c40", fd: 0.00085, night: 0.6 },
-  { t: 0.30, zen: "#2a4e8c", hor: "#8fb8d8", gnd: "#ffd8a8", sun: "#ffd2a0", si: 1.9, hemi: 2.5, fog: "#9fc0d8", fd: 0.0013, night: 0.12 },
-  { t: 0.5, zen: "#1f5fbf", hor: "#8ec8ea", gnd: "#d8eaf5", sun: "#fff4e0", si: 2.5, hemi: 3.0, fog: "#adceE2", fd: 0.0014, night: 0 },
-  { t: 0.70, zen: "#2a4e8c", hor: "#c88a6a", gnd: "#ffc07a", sun: "#ffc490", si: 1.7, hemi: 2.3, fog: "#b08fa4", fd: 0.0013, night: 0.1 },
-  { t: 0.80, zen: "#140a32", hor: "#6d1d63", gnd: "#ff8a4c", sun: "#ffb178", si: 1.0, hemi: 1.45, fog: "#4a1852", fd: 0.001, night: 0.55 },
-  { t: 0.88, zen: "#0a0724", hor: "#3a1550", gnd: "#a8386a", sun: "#8a5a9a", si: 0.34, hemi: 0.82, fog: "#22103a", fd: 0.0007, night: 0.9 },
-  { t: 1.0, zen: "#040611", hor: "#120a2e", gnd: "#241344", sun: "#3a4a8a", si: 0.2, hemi: 0.62, fog: "#0d0a22", fd: 0.00055, night: 1 },
-];
-
-/**
- * The fixed times the player can pin the world to, plus the running clock.
- *
- * Leonida is a day-and-sunset city: full night was dropped as a mode, and the
- * running clock turns back at dusk rather than carrying on into the small
- * hours. Sunset still sits at `night` 0.5 in the palette, so the neon, the
- * headlights and the lit windows are all still there — it just never goes
- * black.
- */
-export const TIME_MODES = ["auto", "day", "sunset"] as const;
-export type TimeMode = (typeof TIME_MODES)[number];
-
-const MODE_TIME: Record<Exclude<TimeMode, "auto">, number> = {
-  day: 0.46,
-  sunset: 0.79,
-};
-
-/** The arc the running clock swings through, and back. */
-const AUTO_MIN = 0.32;
-const AUTO_MAX = 0.82;
-
-function samplePalette(t: number) {
-  const tod = ((t % 1) + 1) % 1;
-  let a = PALETTE[0];
-  let b = PALETTE[PALETTE.length - 1];
-  for (let i = 0; i < PALETTE.length - 1; i++) {
-    if (tod >= PALETTE[i].t && tod <= PALETTE[i + 1].t) {
-      a = PALETTE[i];
-      b = PALETTE[i + 1];
-      break;
-    }
-  }
-  const u = b.t === a.t ? 0 : (tod - a.t) / (b.t - a.t);
-  const mix = (x: string, y: string) =>
-    new THREE.Color(x).lerp(new THREE.Color(y), u);
-  const num = (x: number, y: number) => x + (y - x) * u;
-  return {
-    zen: mix(a.zen, b.zen),
-    hor: mix(a.hor, b.hor),
-    gnd: mix(a.gnd, b.gnd),
-    sun: mix(a.sun, b.sun),
-    si: num(a.si, b.si),
-    hemi: num(a.hemi, b.hemi),
-    fog: mix(a.fog, b.fog),
-    fd: num(a.fd, b.fd),
-    night: num(a.night, b.night),
-  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -270,10 +217,17 @@ export function buildCity(
   const grid = new CollisionGrid();
   const evidence: EvidenceTag[] = [];
   const walk: THREE.Vector3[] = [];
+  /*
+   * Every luminaire the world puts up, published by the modules that build
+   * them. Nothing lights from it: a permanently daylit Leonida has no dynamic
+   * lighting to re-home, and the lamps themselves are emissive geometry.
+   */
   const lamps: { x: number; z: number; h: number }[] = [];
   const parked: { x: number; z: number; rot: number; kind: number }[] = [];
   const tags: { x: number; y: number; z: number; rot: number; label: string }[] = [];
-  const heads: SignalHead[] = [];
+  /** Signal lenses, and advertising pitches — both filled in while building. */
+  const heads: SignalLamp[] = [];
+  const adSites: AdSite[] = [];
 
   const ctx: WorldCtx = {
     bank,
@@ -285,6 +239,7 @@ export function buildCity(
     parked,
     evidence,
     tags,
+    ads: adSites,
     group,
     keep,
   };
@@ -295,8 +250,7 @@ export function buildCity(
 
   /* ---- roads, then blocks ---- */
   const net: RoadNet = buildRoadNet();
-  buildRoads({ bank, mat, grid, walk, lamps }, net);
-  collectSignalHeads(net, heads);
+  buildRoads({ bank, mat, grid, walk, lamps, heads, ads: adSites }, net);
 
   for (let i = 0; i < GRID; i++) {
     for (let j = 0; j < GRID; j++) buildCell(ctx, i, j);
@@ -309,6 +263,14 @@ export function buildCity(
 
   /* ---- the things you navigate by ---- */
   buildLandmarks(ctx);
+
+  /*
+   * ---- and the things the city sells you ----
+   *
+   * Last, because every board's frame welds into the same buckets as everything
+   * above and this has to happen before the flush.
+   */
+  const ads = buildAds(ctx, adSites);
 
   /* ---- weld it all down ---- */
   bank.flush(group, keep, {
@@ -337,7 +299,7 @@ export function buildCity(
     group.add(far.mesh);
   }
 
-  scene.fog = new THREE.FogExp2(0x4a1852, 0.001);
+  scene.fog = new THREE.FogExp2(new THREE.Color(DAY.fog).getHex(), DAY.fd);
 
   /*
    * Parked vehicles are solid too, at the roof height of the model that is
@@ -400,11 +362,15 @@ export function buildCity(
   const boats = keep(new Boats(boatRoutes(), moorings, quality === "high" ? 3 : 2));
   group.add(boats.group);
 
-  /* ---- lighting ---- */
-  const hemi = new THREE.HemisphereLight(0xffa8d8, 0x4a3560, 1.05);
+  /* ---- lighting: a sun, a sky bounce, and a cool fill off the sea ---- */
+  const hemi = new THREE.HemisphereLight(
+    new THREE.Color(DAY.hor).lerp(new THREE.Color(0xffffff), 0.25).getHex(),
+    0x8a7f74,
+    DAY.hemi,
+  );
   group.add(hemi);
 
-  const sun = new THREE.DirectionalLight(0xffb178, 0.8);
+  const sun = new THREE.DirectionalLight(new THREE.Color(DAY.sun).getHex(), DAY.si);
   sun.castShadow = quality === "high";
   sun.shadow.mapSize.set(quality === "high" ? 2048 : 1024, quality === "high" ? 2048 : 1024);
   sun.shadow.camera.near = 1;
@@ -418,23 +384,26 @@ export function buildCity(
   group.add(sun);
   group.add(sun.target);
 
-  const fill = new THREE.DirectionalLight(0x6fe6ff, 0.42);
+  const fill = new THREE.DirectionalLight(0x8fd8f0, 0.5);
   fill.position.set(-120, 90, 160);
   group.add(fill);
 
   /*
-   * Four roaming point lights, re-homed onto the nearest street lamps every
-   * half second. The city's lighting is emissive geometry, but the player
-   * character is a real lit mesh, so these are what make them pick up the
-   * colour of the lamp they are standing under.
+   * Windows, signage and lamp spill.
+   *
+   * There is still no dynamic light anywhere in the city — this is the whole
+   * lighting model for everything that glows, and by day it is a fixed set of
+   * numbers rather than a curve being resampled every frame.
    */
-  const spots: THREE.PointLight[] = [];
-  for (let n = 0; n < (quality === "high" ? 4 : 2); n++) {
-    const p = new THREE.PointLight(0xffc98a, 0, 26, 2);
-    p.position.set(0, -50, 0);
-    group.add(p);
-    spots.push(p);
-  }
+  for (const m of mat.emissives) m.emissiveIntensity = DAY.glow;
+  mat.neon.opacity = DAY.signage.neon;
+  mat.sign.opacity = DAY.signage.sign;
+  mat.pool.opacity = DAY.signage.pool;
+  ads.setFog(new THREE.Color(DAY.fog), DAY.fd);
+  ocean.material.uniforms.fogColor.value.set(DAY.fog);
+  ocean.material.uniforms.fogDensity.value = DAY.fd;
+  ocean.material.uniforms.sky.value.set(DAY.hor);
+  ocean.material.uniforms.deep.value.set("#0b3556");
 
   scene.add(group);
 
@@ -450,65 +419,9 @@ export function buildCity(
   resolveCollisions(_spawn, 0.45, grid);
   const spawn = { x: _spawn.x, z: _spawn.z, yaw: -Math.PI / 2 };
 
-  const state = {
-    tod: MODE_TIME.sunset,
-    night: 0.55,
-    /** "auto" runs the clock; the rest pin the world to one lighting setup. */
-    mode: "sunset" as TimeMode,
-    /** Which way the running clock is currently travelling. */
-    dir: 1,
-  };
   const scratch: Collider[] = [];
   const _from = new THREE.Vector3();
-  let sinceLights = 9;
-
-  function applyTime() {
-    const p = samplePalette(state.tod);
-    state.night = p.night;
-
-    // sun tracks a plausible arc: up in the east, down in the west
-    const ang = (state.tod - 0.25) * Math.PI * 2;
-    const elev = Math.sin(ang);
-    const dir = new THREE.Vector3(
-      Math.cos(ang) * 0.75,
-      Math.max(elev, -0.35),
-      -0.45,
-    ).normalize();
-
-    sky.mat.uniforms.zenith.value.copy(p.zen);
-    sky.mat.uniforms.horizon.value.copy(p.hor);
-    sky.mat.uniforms.ground.value.copy(p.gnd);
-    sky.mat.uniforms.sunDir.value.copy(dir);
-    sky.mat.uniforms.night.value = p.night;
-
-    sun.color.copy(p.sun);
-    sun.intensity = p.si;
-    hemi.intensity = p.hemi;
-    hemi.color.copy(p.hor).lerp(new THREE.Color(0xffffff), 0.25);
-    fill.intensity = 0.2 + (1 - p.night) * 0.75;
-
-    const fog = scene.fog as THREE.FogExp2 | null;
-    if (fog) {
-      fog.color.copy(p.fog);
-      fog.density = p.fd;
-    }
-    ocean.material.uniforms.fogColor.value.copy(p.fog);
-    ocean.material.uniforms.fogDensity.value = p.fd;
-    ocean.material.uniforms.sky.value.copy(p.hor);
-    ocean.material.uniforms.deep.value
-      .set("#07203a")
-      .lerp(new THREE.Color("#02060e"), p.night);
-
-    // Windows, signage and lamp spill all come up as the light goes down. This
-    // is the entire night lighting model — there is no dynamic light doing it.
-    const glow = 0.18 + p.night * 1.25;
-    for (const m of mat.emissives) m.emissiveIntensity = glow;
-    mat.neon.opacity = 0.32 + p.night * 0.68;
-    mat.sign.opacity = 0.28 + p.night * 0.72;
-    mat.pool.opacity = 0.04 + p.night * 1.15;
-    for (const s of spots) s.intensity = p.night * 16;
-  }
-  applyTime();
+  const sunDir = DAY.sunDir;
 
   return {
     group,
@@ -517,69 +430,28 @@ export function buildCity(
     waypoints: walk,
     sun,
     spawn,
-    get timeOfDay() {
-      return state.tod;
-    },
-    get nightness() {
-      return state.night;
-    },
-    setTimeOfDay(t) {
-      state.tod = ((t % 1) + 1) % 1;
-      applyTime();
-    },
-    get timeMode() {
-      return state.mode;
-    },
-    setTimeMode(mode) {
-      state.mode = mode;
-      if (mode !== "auto") state.tod = MODE_TIME[mode];
-      applyTime();
-      return mode;
-    },
-    cycleTimeMode() {
-      const next = TIME_MODES[(TIME_MODES.indexOf(state.mode) + 1) % TIME_MODES.length];
-      return this.setTimeMode(next);
-    },
     stats: {
       buildings,
       colliders: grid.count,
       draws: group.children.length,
+      ads: ads.boards,
     },
 
     update(dt, t, opts) {
-      /*
-       * A full sweep runs about eight minutes, unless the player has pinned
-       * the lighting to one time. It reverses at each end of the arc instead
-       * of wrapping through midnight — morning up to dusk, then back down.
-       */
-      if (state.mode === "auto") {
-        state.tod += (dt / 480) * state.dir;
-        if (state.tod >= AUTO_MAX) {
-          state.tod = AUTO_MAX;
-          state.dir = -1;
-        } else if (state.tod <= AUTO_MIN) {
-          state.tod = AUTO_MIN;
-          state.dir = 1;
-        }
-      }
-      applyTime();
-
       // keep the shadow volume on the player, not on the world origin
       sun.target.position.set(opts.x, 0, opts.z);
       sun.target.updateMatrixWorld();
-      const d = sky.mat.uniforms.sunDir.value as THREE.Vector3;
-      sun.position.set(opts.x + d.x * 150, 30 + d.y * 150, opts.z + d.z * 150);
+      sun.position.set(
+        opts.x + sunDir.x * 150,
+        30 + sunDir.y * 150,
+        opts.z + sunDir.z * 150,
+      );
 
       ocean.update(t);
-      traffic.update(dt, t, opts.x, opts.z, state.night);
+      ads.update(t);
+      traffic.update(dt, t, opts.x, opts.z);
       crowd.update(dt, opts.x, opts.z, opts.heat);
       boats.update(dt, t);
-
-      sinceLights += dt;
-      if (sinceLights > 0.5) {
-        sinceLights = 0;
-        nearestLamps(lamps, opts.x, opts.z, spots);
-      }
     },
 
     resolveVehicles(pos, radius, clearTop) {
@@ -618,6 +490,7 @@ export function buildCity(
 
     dispose() {
       for (const d of disposables) d.dispose();
+      ads.dispose();
       group.traverse((o) => {
         const m = o as THREE.Mesh;
         m.geometry?.dispose?.();
@@ -627,47 +500,6 @@ export function buildCity(
       void scratch;
     },
   };
-}
-
-/* ------------------------------------------------------------------ */
-/* helpers                                                             */
-/* ------------------------------------------------------------------ */
-
-function collectSignalHeads(net: RoadNet, out: SignalHead[]) {
-  for (const s of net.signals) {
-    // one head per approach, on the near kerb, matching roads.ts
-    for (const [ax, az] of [[0, -1], [0, 1], [-1, 0], [1, 0]] as const) {
-      const axis: 0 | 1 = ax === 0 ? 0 : 1;
-      out.push({
-        x: s.x + ax * 12 + (ax === 0 ? 9 : 0),
-        y: 5.8,
-        z: s.z + az * 12 + (az === 0 ? 9 : 0),
-        axis,
-        offset: s.offset,
-      });
-    }
-  }
-}
-
-/** Re-homes the roaming point lights onto the closest street lamps. */
-function nearestLamps(
-  lamps: { x: number; z: number; h: number }[],
-  x: number,
-  z: number,
-  out: THREE.PointLight[],
-) {
-  const best: { d: number; l: { x: number; z: number; h: number } }[] = [];
-  for (const l of lamps) {
-    const d = (l.x - x) ** 2 + (l.z - z) ** 2;
-    if (d > 60 * 60) continue;
-    best.push({ d, l });
-  }
-  best.sort((a, b) => a.d - b.d);
-  for (let i = 0; i < out.length; i++) {
-    const pick = best[i];
-    if (pick) out[i].position.set(pick.l.x, pick.l.h - 0.4, pick.l.z);
-    else out[i].position.set(x, -60, z);
-  }
 }
 
 /* ------------------------------------------------------------------ */

@@ -10,7 +10,12 @@
 
 import type * as THREE from "three";
 
-export type EvidenceKind = "FACE" | "PLATE" | "LANDMARK" | "CONTRABAND";
+export type EvidenceKind =
+  | "FACE"
+  | "PLATE"
+  | "LANDMARK"
+  | "CONTRABAND"
+  | "BILLBOARD";
 
 export type EvidenceTag = {
   kind: EvidenceKind;
@@ -21,4 +26,25 @@ export type EvidenceTag = {
   offset: THREE.Vector3;
   /** Roughly how big the detail is, for the in-frame test. */
   radius: number;
+};
+
+/**
+ * A place the city has sold to an advertiser.
+ *
+ * Sites are collected while the world is generated — `roads.ts` finds the
+ * kerbside pitches, `blocks.ts` the rooftops and blank gable walls — and
+ * `ads.ts` then builds every one of them into a single screen mesh, so a
+ * hundred rotating boards still cost one draw call.
+ */
+export type AdSite = {
+  /** Centre of the screen face. */
+  x: number;
+  y: number;
+  z: number;
+  /** Yaw the face looks along. 0 = +Z, as with `MeshBuilder.panel`. */
+  rot: number;
+  w: number;
+  h: number;
+  /** Rooftop hoarding, wall superside, or a kerbside board on two posts. */
+  kind: "roof" | "wall" | "kerb";
 };

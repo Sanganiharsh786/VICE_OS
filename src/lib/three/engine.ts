@@ -28,7 +28,6 @@ import {
   resolveCollisions,
   type City,
   type EvidenceTag,
-  type TimeMode,
 } from "./city";
 import { LANDMARK_SPOTS, districtAt, placeName, surfaceAt } from "./world/layout";
 import { sfx } from "../audio";
@@ -53,10 +52,6 @@ export type Stats = {
   z: number;
   /** Which way the camera faces, radians — rotates the minimap. */
   camYaw: number;
-  /** 0..1 through the day. */
-  timeOfDay: number;
-  /** Whether the clock is running, or pinned to day / sunset. */
-  timeMode: TimeMode;
   camera: CameraMode;
 };
 
@@ -181,8 +176,7 @@ const NO_SCROLL = new Set([
 /** Things the engine wants the UI to know about the moment they happen. */
 export type EngineEvent =
   | { kind: "travel"; place: string }
-  | { kind: "camera"; camera: CameraMode }
-  | { kind: "time"; mode: TimeMode };
+  | { kind: "camera"; camera: CameraMode };
 
 export class StreetEngine {
   private renderer: THREE.WebGLRenderer;
@@ -445,7 +439,6 @@ export class StreetEngine {
    *   Q E               turn camera   R F    look up/down
    *   C                 camera mode   F      raise the phone
    *   T                 fast travel   1-9    jump to a landmark
-   *   [ ]               scrub time    N      flip day / sunset
    *   X                 back to spawn
    */
   private onKeyDown = (e: KeyboardEvent) => {
@@ -478,8 +471,6 @@ export class StreetEngine {
     else if (is("KeyT", "t")) {
       this.travelIdx = (this.travelIdx + 1) % LANDMARK_SPOTS.length;
       this.travelTo(this.travelIdx);
-    } else if (is("KeyN", "n")) {
-      this.onEvent({ kind: "time", mode: this.city.cycleTimeMode() });
     } else if (is("KeyX", "x")) {
       this.player.teleport(
         this.city.spawn.x,
@@ -488,12 +479,6 @@ export class StreetEngine {
       );
       this.camYaw = this.city.spawn.yaw;
       this.snapCamera();
-    } else if (is("BracketLeft", "[") || is("BracketRight", "]")) {
-      // scrubbing by hand implies you want the clock to stop moving under you
-      if (this.city.timeMode === "auto") this.city.setTimeMode("sunset");
-      this.city.setTimeOfDay(
-        this.city.timeOfDay + (e.code === "BracketLeft" || ch === "[" ? -0.03 : 0.03),
-      );
     } else if (/^[1-9]$/.test(ch)) {
       this.travelIdx = Number(ch) - 1;
       this.travelTo(this.travelIdx);
@@ -532,13 +517,6 @@ export class StreetEngine {
 
   setCamera(mode: CameraMode) {
     this.camMode = mode;
-  }
-
-  /** Steps the lighting: auto -> day -> sunset. */
-  cycleTimeMode() {
-    const mode = this.city.cycleTimeMode();
-    this.onEvent({ kind: "time", mode });
-    return mode;
   }
 
   /**
@@ -1008,8 +986,6 @@ export class StreetEngine {
       x: p.x,
       z: p.z,
       camYaw: this.camYaw,
-      timeOfDay: this.city.timeOfDay,
-      timeMode: this.city.timeMode,
       camera: this.camMode,
     });
   }

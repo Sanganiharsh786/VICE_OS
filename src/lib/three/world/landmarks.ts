@@ -183,11 +183,11 @@ function stadium(ctx: WorldCtx) {
  * Observation wheel over the beach. Turns.
  *
  * The gondolas and the rim used to be built out of the `neon` bucket, which is
- * an additive, depth-write-free material whose opacity the day/night cycle
- * pulls down to 0.32 in daylight. After dark that is exactly right — the wheel
- * is a ring of light over the water. In daylight it meant the whole ride went
- * translucent: you could see the sea straight through the cars, and the rim
- * was a faint smear rather than a structure.
+ * an additive, depth-write-free material held at low opacity in daylight. On a
+ * night city that is exactly right — the wheel is a ring of light over the
+ * water. In permanent daylight it meant the whole ride went translucent: you
+ * could see the sea straight through the cars, and the rim was a faint smear
+ * rather than a structure.
  *
  * So the ride is now solid — painted cars on a steel rim, lit by the sun like
  * everything else — and the neon is reduced to what it should always have

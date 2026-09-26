@@ -30,7 +30,7 @@ import {
   type Terrain,
 } from "./layout";
 import { cellRng, irange, pick, range, type Rnd } from "./rng";
-import type { EvidenceTag } from "./types";
+import type { AdSite, EvidenceTag } from "./types";
 
 /** Pavement width on an ordinary street / on an avenue. */
 const PAVE = 4.4;
@@ -61,6 +61,8 @@ export type WorldCtx = {
   evidence: EvidenceTag[];
   /** Tagged walls — the surfaces the Image Lab's work belongs on. */
   tags: { x: number; y: number; z: number; rot: number; label: string }[];
+  /** Rooftop and gable-wall advertising pitches, built later by `ads.ts`. */
+  ads: AdSite[];
   group: THREE.Group;
   keep: (d: { dispose: () => void }) => void;
 };
@@ -146,12 +148,21 @@ const FACE_DIR: Record<Facing, [number, number]> = {
   2: [1, 0],
   3: [-1, 0],
 };
-/** Rotation that makes a panel's face point the given way. */
+/**
+ * Rotation that makes a panel's face point the given way.
+ *
+ * `MeshBuilder.panel` winds its quad so the front normal is
+ * `(sin rot, 0, cos rot)`, and the two X entries here were the wrong way round:
+ * every shop sign, blade sign and awning on a frontage facing ±X was turned to
+ * look *into* its own building. The sign material is single-sided, so those
+ * were being back-face culled — about half the city's signage was simply not
+ * drawn, on every north-south street.
+ */
 const FACE_ROT: Record<Facing, number> = {
   0: 0,
   1: Math.PI,
-  2: -Math.PI / 2,
-  3: Math.PI / 2,
+  2: Math.PI / 2,
+  3: -Math.PI / 2,
 };
 
 function building(
@@ -261,6 +272,48 @@ function building(
   /* -------- street-facing signage -------- */
   const [fx, fz] = FACE_DIR[facing];
   const faceW = facing < 2 ? w : d;
+
+  /*
+   * Advertising pitches.
+   *
+   * Only the site is recorded — every board in the city is built by `ads.ts`
+   * into one screen mesh so they can share an atlas and a shader. This is the
+   * one place that knows a building's real height, its top-stage footprint and
+   * which way it faces the street, which is why the choice is made here.
+   *
+   * Both are capped below the setback threshold (55m): above it the shaft steps
+   * in, and a board sized to the base footprint would hang off the side of a
+   * storey that isn't there any more.
+   */
+  const roofFaceW = facing < 2 ? cw : cd;
+  if (topY > 9 && topY < 52 && roofFaceW > 10 && rnd() < 0.22) {
+    const bw = Math.min(roofFaceW * 0.88, 16);
+    const bh = Math.min(bw * 0.42, 7);
+    ctx.ads.push({
+      x: cx + fx * ((facing < 2 ? cd : cw) / 2 - 0.5),
+      y: topY + 1.3 + bh / 2,
+      z: cz + fz * ((facing < 2 ? cd : cw) / 2 - 0.5),
+      rot: FACE_ROT[facing],
+      w: bw,
+      h: bh,
+      kind: "roof",
+    });
+  } else if (h > 26 && h < 52 && faceW > 11 && rnd() < 0.16) {
+    // a portrait superside painted up the gable, the way a real one is
+    const bw = Math.min(faceW * 0.66, 11);
+    const bh = Math.min(bw * 1.45, h - BASE_H - 6);
+    if (bh > 6) {
+      ctx.ads.push({
+        x: cx + fx * ((facing < 2 ? d : w) / 2 + 0.3),
+        y: BASE_H + 2.5 + bh / 2,
+        z: cz + fz * ((facing < 2 ? d : w) / 2 + 0.3),
+        rot: FACE_ROT[facing],
+        w: bw,
+        h: bh,
+        kind: "wall",
+      });
+    }
+  }
   if (rnd() < spec.neon && faceW > 5 && terrain !== "park") {
     const signB = bank.bucket("sign", mat.sign);
     const poolB = bank.bucket("pool", mat.pool);

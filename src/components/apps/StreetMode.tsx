@@ -8,7 +8,6 @@ import {
   type Quality,
   type Stats,
 } from "@/lib/three/engine";
-import type { TimeMode } from "@/lib/three/city";
 import { LANDMARK_SPOTS } from "@/lib/three/world/layout";
 import { heatTier } from "@/lib/forensics";
 import { tintOf, type Evidence } from "@/lib/evidence";
@@ -33,15 +32,7 @@ const EMPTY: Stats = {
   x: 0,
   z: 0,
   camYaw: 0,
-  timeOfDay: 0.79,
-  timeMode: "sunset",
   camera: "shoulder",
-};
-
-const TIME_LABEL: Record<TimeMode, string> = {
-  auto: "AUTO",
-  day: "DAY",
-  sunset: "SUNSET",
 };
 
 const CAMERA_LABEL: Record<CameraMode, string> = {
@@ -49,14 +40,6 @@ const CAMERA_LABEL: Record<CameraMode, string> = {
   wide: "WIDE",
   cinematic: "CINEMA",
 };
-
-/** Leonida runs on a 24-hour clock; the world hands us 0..1 through the day. */
-function clock(t: number) {
-  const mins = Math.round(t * 1440) % 1440;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
 
 const KEYS: [string, string][] = [
   ["W A S D / ↑ ↓ ← →", "walk"],
@@ -68,8 +51,6 @@ const KEYS: [string, string][] = [
   ["ENTER", "take the shot"],
   ["C", "camera distance"],
   ["T  ·  1-9", "travel across the city"],
-  ["N", "daylight / sunset"],
-  ["[  ]", "scrub the clock"],
   ["X", "back to the seafront"],
   ["H", "this list"],
   ["ESC", "back to the phone"],
@@ -139,7 +120,6 @@ export default function StreetMode({
         engine.setEventSink((e) => {
           if (e.kind === "travel") setToast(e.place);
           if (e.kind === "camera") setToast(`CAMERA · ${CAMERA_LABEL[e.camera]}`);
-          if (e.kind === "time") setToast(`LIGHT · ${TIME_LABEL[e.mode]}`);
         });
         engine.start();
         setReady(true);
@@ -337,18 +317,11 @@ export default function StreetMode({
           </p>
           <p className="mt-0.5 font-mono text-[10px] tabular-nums text-white/45">
             {stats.heading} · {(stats.speed * 3.6).toFixed(0)} KM/H ·{" "}
-            {clock(stats.timeOfDay)} · {stats.fps.toFixed(0)} FPS
+            {stats.fps.toFixed(0)} FPS
           </p>
         </div>
 
         <div className="pointer-events-auto flex items-center gap-2">
-          <button
-            onClick={() => engineRef.current?.cycleTimeMode()}
-            className="glass-deep rounded-xl px-3 py-2 font-mono text-[9px] tracking-[0.18em] text-vice-cyan transition hover:text-white"
-            title="Daylight / sunset (N)"
-          >
-            {TIME_LABEL[stats.timeMode]}
-          </button>
           <button
             onClick={() => engineRef.current?.cycleCameraMode()}
             className="glass-deep rounded-xl px-3 py-2 font-mono text-[9px] tracking-[0.18em] text-white/60 transition hover:text-white"

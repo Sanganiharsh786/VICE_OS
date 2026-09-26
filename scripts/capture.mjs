@@ -191,19 +191,12 @@ async function main() {
     await shot(page, "boardwalk");
 
     /*
-     * The vehicles, in daylight and up close.
+     * The vehicles, up close.
      *
-     * Sunset hides half of what is on them — the glazing band, the painted
-     * roof, the tuck over the wheels — behind its own contrast, so this one
-     * frame runs in day and puts the clock back afterwards. Sprinting at the
-     * kerb rather than creeping to a mark is deliberate: the parked stock is
-     * solid, so the run ends with the lens against a wing.
+     * Sprinting at the kerb rather than creeping to a mark is deliberate: the
+     * parked stock is solid, so the run ends with the lens against a wing.
      */
     await press(page, "KeyV", 540); // level again
-    await page.keyboard.press("KeyN"); // sunset -> auto
-    await wait(300);
-    await page.keyboard.press("KeyN"); // auto -> day
-    await wait(900);
     await page.keyboard.press("KeyC"); // cinematic -> shoulder
     await wait(250);
     await page.keyboard.press("KeyC"); // shoulder -> wide
@@ -214,8 +207,6 @@ async function main() {
     await page.keyboard.up("ShiftLeft");
     await wait(1800);
     await shot(page, "traffic");
-    await page.keyboard.press("KeyN"); // day -> sunset, for everything after
-    await wait(600);
 
     // back to the avenue for the shutter sequence, which wants a busy frame
     await page.keyboard.press("Digit2");

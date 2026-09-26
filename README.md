@@ -215,23 +215,53 @@ band's width is derived from the taper of whatever it wraps, at its own height, 
 the flank by the same 3 cm on a hatchback and on a bus without either of them carrying a
 hand-tuned number.
 
+Junctions are signalised properly, and the signals are built like the real thing: a mast
+arm out over the lane, a backplate with a bright surround so the lenses read against a
+daylit sky, a visor with cheeks over every lens, and a pedestrian head on the pole that
+walks when its own approach is held. The timing plan is one 28-second cycle — green, a
+3.2-second amber, then **1.3 seconds of all-red clearance** before the cross street gets
+green, which is the interval that stops anything still in the box being driven through.
+
+Traffic obeys it. A car brakes to the painted stop line rather than four metres past it,
+decides an amber on whether the stop is actually available at its speed rather than on
+distance alone, will not enter a junction it has no room to leave, and — once its nose is
+over the line — is committed and clears the box instead of freezing in it. Measured over
+~500 simulated seconds: no vehicle crosses its stop line on red, queues form at 14.5 m,
+21.7 m, 28.1 m, 34.4 m behind the line, and the longest any car spends stationary inside a
+junction is 1.3 seconds.
+
 Beyond that: a continuous beach, boardwalk and pier along the whole east coast, a working
 harbour with gantry cranes and container stacks, a marina, six over-scaled landmarks you
-can navigate by, a distant skyline ring that removes the map edge, and a lighting cycle
-that turns every window, sign and street lamp on as the sun drops. It defaults to sunset
-and can be pinned to **day** or **sunset**, or set to **auto** to let the clock swing and
-turn back at dusk — fog density is part of that palette, at its thinnest late on so the
-neon two blocks away still reaches you.
+can navigate by, and a distant skyline ring that removes the map edge.
+
+Leonida is **permanently late morning**. The clock, the palette and the pinnable modes are
+gone: one lighting setup, applied once at build time, with no way for the world to end up
+somewhere dark.
 
 <img src="docs/media/boardwalk.jpg" alt="The observation wheel over South Beach at dusk: a steel rim carrying painted gondolas, with cyan and pink light tubes running round both sides of it" width="100%">
 
-The landmarks are solid in daylight and lit after dark, which sounds obvious and was not.
-The observation wheel used to be built entirely out of the additive, depth-write-free
-material the neon uses, whose opacity the lighting cycle pulls down to a third at noon —
-so at midday you could see the sea through its gondolas. It is a painted fairground ride on
-a steel rim now, and the neon is what it should always have been: a strip on each car and a
-tube round each side of the rim, which still fade out at noon while the ride underneath
-them does not.
+The landmarks are solid, which sounds obvious and was not. The observation wheel used to be
+built entirely out of the additive, depth-write-free material the neon uses, which is held
+at low opacity in daylight — so you could see the sea through its gondolas. It is a painted
+fairground ride on a steel rim now, and the neon is what it should always have been: a
+strip on each car and a tube round each side of the rim.
+
+### The city sells its wall space
+
+A daylit city needs something to be the brightest thing in frame, and neon isn't it. So
+Leonida has **advertising**: kerbside boards on two posts down the avenues, rooftop
+hoardings on the low-rise stock, and portrait supersides painted up gable walls — 191 of
+them, each with its own frame, floodlight bracket and raked bracing.
+
+Twelve campaigns are painted once into a single atlas at build time. Which one a board is
+showing is then decided **in the fragment shader** from `time` and a per-board index
+carried in a vertex attribute, so every board runs its own staggered nine-second dwell with
+a wipe between creatives — and the entire system costs one uniform write per frame and one
+draw call for the whole city.
+
+They are also evidence. A board in your shot is an `AD BOARD` tag naming the district you
+were standing in, worth 3 heat: the cheapest thing in the register, and the one piece of
+evidence you can almost always crop out.
 
 There are **no dynamic lights**. Lit windows, neon and lamp spill are emissive geometry
 and additive ground pools, which is what lets the city carry thousands of "lights" at
@@ -256,8 +286,6 @@ without it.
 | `Enter` | take the shot |
 | `C` | camera distance |
 | `T`, `1`–`9`, or the map | travel across the city |
-| `N`, or the HUD chip | auto / daylight / sunset |
-| `[` `]` | scrub the clock |
 | `X` | back to the seafront |
 | `H` | the full list, in game |
 | `Esc` | back to the phone |
@@ -558,19 +586,21 @@ src/
     three/
       rig.ts        procedural humanoid — skeleton, skinned surface, weights
       locomotion.ts gait solver, two-bone IK, full-body procedural animation
-      city.ts       assembles the world, day/night, the evidence register
+      city.ts       assembles the world, its one daylight, the evidence register
       world/        layout.ts   the tilemap, districts, named places, surfaces
                     roads.ts    the road network as data, then as geometry
                     blocks.ts   what fills a city block
                     builder.ts  merged static geometry, world-scaled UVs
                     collision.ts uniform grid: collision + line of sight
-                    traffic.ts  the fleet: vehicle shapes, lanes and signals
+                    traffic.ts  the fleet: vehicle shapes, lanes, stopping
+                    signals.ts  signal timing, stop lines, lens positions
+                    ads.ts      the advertising: creatives, boards, the screen shader
                     crowd.ts    the instanced crowd, and the boats
                     water.ts    ocean shader, beach, piers, harbour, marina
                     landmarks.ts the six things you navigate by
                     skyline.ts  the city you can see but never reach
                     textures.ts every surface, painted into a canvas
-                    materials.ts one place for batching and day/night
+                    materials.ts one place for batching and the emissive set
       engine.ts     renderer, camera rig, crowd, post chain, photo capture
     audio.ts        every sound in the OS — UI, shutter, radio, footsteps
     editorConfig.ts the editor's three vocabularies, tool icons, CDN warm-up

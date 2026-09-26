@@ -16,44 +16,12 @@
 
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { CELL, GRID, HALF } from "./layout";
+import { CELL, GRID, HALF, roadWidth } from "./layout";
 import { laneCount, laneOffset, type RoadNet } from "./roads";
 import { irange, pick, type Rnd } from "./rng";
+import { BRAKE, lightState, stopLineAt, type SignalLamp } from "./signals";
 import { plateTexture } from "./textures";
 import type { EvidenceTag } from "./types";
-
-/* ------------------------------------------------------------------ */
-/* signals                                                             */
-/* ------------------------------------------------------------------ */
-
-const CYCLE = 20;
-const NS_GREEN = 8.8;
-const NS_AMBER = 10;
-const EW_GREEN = 18.8;
-
-export type Phase = "green" | "amber" | "red";
-
-/** Light shown to traffic on `axis` (0 = north-south) at this intersection. */
-export function lightState(axis: 0 | 1, offset: number, t: number): Phase {
-  const p = (t + offset) % CYCLE;
-  if (axis === 0) {
-    if (p < NS_GREEN) return "green";
-    if (p < NS_AMBER) return "amber";
-    return "red";
-  }
-  if (p < NS_AMBER) return "red";
-  if (p < EW_GREEN) return "green";
-  return "amber";
-}
-
-export type SignalHead = {
-  x: number;
-  y: number;
-  z: number;
-  /** Which approach this head governs. */
-  axis: 0 | 1;
-  offset: number;
-};
 
 /* ------------------------------------------------------------------ */
 /* vehicle shapes                                                      */
@@ -318,7 +286,11 @@ type Car = {
   planned: boolean;
 };
 
-const LANE_KEY = (c: Car) => c.axis * 1e6 + (c.line + 32) * 1e4 + (c.dir + 1) * 100 + c.lane;
+const LANE_ID = (axis: 0 | 1, line: number, dir: 1 | -1, lane: number) =>
+  axis * 1e6 + (line + 32) * 1e4 + (dir + 1) * 100 + lane;
+const LANE_KEY = (c: Car) => LANE_ID(c.axis, c.line, c.dir, c.lane);
+/** Junction identity, for the "is the box clear?" test. */
+const NODE_KEY = (k: number, m: number) => (k + 32) * 128 + (m + 32);
 
 /* Scratch for the ray test below — it runs once per car per frame. */
 const _UP = new THREE.Vector3(0, 1, 0);
@@ -367,7 +339,16 @@ export class Traffic {
   private lamp: THREE.InstancedMesh;
   private bumper: THREE.InstancedMesh;
   private signal: THREE.InstancedMesh | null = null;
-  private heads: SignalHead[] = [];
+  private heads: SignalLamp[] = [];
+  /**
+   * Junctions with a vehicle in them this tick, and on which axis.
+   *
+   * Rebuilt every frame in a short pre-pass. Without it the all-red interval is
+   * the only thing keeping cross-traffic apart, and anything slowed in the box —
+   * a bus part-way through a turn, a car that ran the amber — gets driven
+   * straight through by whoever gets green next.
+   */
+  private busy = new Map<number, number>();
 
   private capacity: number;
   private moving: number;
@@ -387,7 +368,7 @@ export class Traffic {
     rnd: Rnd;
     moving: number;
     parked: { x: number; z: number; rot: number; kind: number }[];
-    heads: SignalHead[];
+    heads: SignalLamp[];
     evidence: EvidenceTag[];
   }) {
     this.net = opts.net;
@@ -524,40 +505,69 @@ export class Traffic {
 
   /* ---------------- signals ---------------- */
 
+  /**
+   * One instance per lens, at the position the mast that holds it published.
+   *
+   * The lens is a short disc rather than a sphere, set into the housing and
+   * turned to face the traffic it is talking to — a sphere lights up the same
+   * from behind, which is how you used to be able to read the signal for the
+   * cross street through the back of its own visor.
+   */
   private buildSignals(
-    heads: SignalHead[],
+    heads: SignalLamp[],
     keep: <T extends { dispose: () => void }>(d: T) => T,
   ) {
     if (!heads.length) return;
     this.heads = heads;
-    const geo = keep(new THREE.SphereGeometry(0.17, 6, 5));
+    // pre-rotated so the disc's axis is +Z, i.e. the face looks down +Z
+    const geo = keep(new THREE.CylinderGeometry(1, 1, 1, 12).rotateX(Math.PI / 2));
     const mat = keep(new THREE.MeshBasicMaterial({ toneMapped: false }));
-    const im = new THREE.InstancedMesh(geo, mat, heads.length * 3);
+    const im = new THREE.InstancedMesh(geo, mat, heads.length);
     im.frustumCulled = false;
-    const m = new THREE.Matrix4();
     heads.forEach((h, i) => {
-      for (let l = 0; l < 3; l++) {
-        m.makeTranslation(h.x, h.y + 0.42 - l * 0.42, h.z);
-        im.setMatrixAt(i * 3 + l, m);
-        im.setColorAt(i * 3 + l, this._col.setHex(0x120c10));
-      }
+      this._m.compose(
+        this._p.set(h.x, h.y, h.z),
+        this._q.setFromAxisAngle(_UP, h.rot),
+        this._sc.set(h.r, h.r, 0.07),
+      );
+      im.setMatrixAt(i, this._m);
+      im.setColorAt(i, this._col.setHex(0x120c10));
     });
     im.instanceMatrix.needsUpdate = true;
     this.signal = im;
     this.group.add(im);
   }
 
+  /** Red, amber, green, then the pedestrian hand and the pedestrian walk. */
+  private static LIT = [0xff2f22, 0xffb018, 0x2fe06a, 0xff6a28, 0xf4f8ff];
+  private static DIM = [0x2a0806, 0x2a1c04, 0x062a10, 0x2a0e04, 0x181a20];
+
   private updateSignals(t: number) {
     const im = this.signal;
     if (!im || !im.instanceColor) return;
-    const DIM = [0x2a0806, 0x2a1c04, 0x062a10];
-    const LIT = [0xff2b1f, 0xffb020, 0x2fe06a];
+    // the clearance flash on the pedestrian hand, twice a second
+    const flash = Math.floor(t * 2) % 2 === 0;
     this.heads.forEach((h, i) => {
       const state = lightState(h.axis, h.offset, t);
-      const on = state === "red" ? 0 : state === "amber" ? 1 : 2;
-      for (let l = 0; l < 3; l++) {
-        im.setColorAt(i * 3 + l, this._col.setHex(l === on ? LIT[l] : DIM[l]));
-      }
+      /*
+       * Pedestrians on this arm cross it side-on, so they walk exactly when its
+       * traffic is held — and the hand flashes through amber to say the walk is
+       * about to end.
+       */
+      const on =
+        h.slot === 0
+          ? state === "red"
+          : h.slot === 1
+            ? state === "amber"
+            : h.slot === 2
+              ? state === "green"
+              : h.slot === 3
+                ? state !== "red" && (state !== "amber" || flash)
+                : state === "red";
+      im.setColorAt(
+        i,
+        this._col.setHex(on ? Traffic.LIT[h.slot] : Traffic.DIM[h.slot]),
+      );
     });
     im.instanceColor.needsUpdate = true;
   }
@@ -630,7 +640,14 @@ export class Traffic {
     return dir > 0 ? Math.PI / 2 : -Math.PI / 2;
   }
 
-  /** Writes one vehicle's twelve instance matrices. */
+  /**
+   * Writes one vehicle's twelve instance matrices.
+   *
+   * `braking` is the only lamp state a permanently daylit city has any use for,
+   * and it is not decoration: a line of cars coming to rest at a red is much
+   * easier to read as *stopping* than as *having stopped*, and it is the one
+   * cue that tells the player a junction is about to release.
+   */
   private write(
     idx: number,
     spec: VehicleSpec,
@@ -638,7 +655,7 @@ export class Traffic {
     z: number,
     yaw: number,
     colour: THREE.Color | number,
-    lit: boolean,
+    braking: boolean,
   ) {
     const q = this._q.setFromAxisAngle(_UP, yaw);
     const sin = Math.sin(yaw);
@@ -718,7 +735,7 @@ export class Traffic {
       this.lamp.setMatrixAt(idx * 4 + n, this._m);
       this.lamp.setColorAt(
         idx * 4 + n,
-        this._col.setHex(rear ? (lit ? 0xff2020 : 0x5a0c0c) : lit ? 0xfff2d0 : 0x3a3830),
+        this._col.setHex(rear ? (braking ? 0xff2418 : 0x5a1010) : 0xd8d2c0),
       );
     });
 
@@ -795,16 +812,64 @@ export class Traffic {
     return false;
   }
 
+  /**
+   * Free road ahead of `s` in one lane, for a vehicle of length `len`.
+   *
+   * Used twice per car: once for the queue in its own lane, and once — for a
+   * car about to turn — for the queue on the road it is turning into, which is
+   * the only way to know whether it can actually leave the junction it is about
+   * to enter. `self` is skipped when scanning the car's own lane.
+   */
+  private roomAhead(
+    key: number,
+    s: number,
+    dir: 1 | -1,
+    len: number,
+    self?: Car,
+    /** Ignore anything further ahead than this — see the turning case below. */
+    within = Infinity,
+  ) {
+    const lane = this.buckets.get(key);
+    if (!lane) return Infinity;
+    let room = Infinity;
+    for (const o of lane) {
+      if (o === self) continue;
+      const gap = (o.s - s) * dir;
+      if (gap > 0 && gap <= within) {
+        room = Math.min(room, gap - (len / 2 + VEHICLES[o.spec].l / 2 + 2.2));
+      }
+    }
+    return room;
+  }
+
   /* ---------------- the step ---------------- */
 
-  update(dt: number, t: number, playerX: number, playerZ: number, night: number) {
+  update(dt: number, t: number, playerX: number, playerZ: number) {
     /* lane occupancy, rebuilt each tick — a hundred entries, not a concern */
     this.buckets.clear();
+    this.busy.clear();
     for (const c of this.cars) {
       const k = LANE_KEY(c);
       let arr = this.buckets.get(k);
       if (!arr) this.buckets.set(k, (arr = []));
       arr.push(c);
+
+      /*
+       * And which junction box it is standing in, if any. Found from the
+       * position rather than from `car.node`, because a car that has just
+       * turned is still physically inside the junction it left while `node`
+       * already points at the next one.
+       */
+      const [cx, cz] = this.place(c.axis, c.line, c.lane, c.dir, c.s);
+      const nk = Math.round(cx / CELL);
+      const nm = Math.round(cz / CELL);
+      if (
+        Math.abs(cx - nk * CELL) < roadWidth(nk) / 2 + 1 &&
+        Math.abs(cz - nm * CELL) < roadWidth(nm) / 2 + 1
+      ) {
+        const key = NODE_KEY(nk, nm);
+        this.busy.set(key, (this.busy.get(key) ?? 0) | (1 << c.axis));
+      }
     }
 
     this.since += dt;
@@ -838,33 +903,117 @@ export class Traffic {
       /* ---- how far we may travel before something stops us ---- */
       let allowed = Infinity;
 
-      // the junction, if the light is against us
+      /*
+       * The car in front, in our own lane.
+       *
+       * Worked out before the signal rather than after it, because the junction
+       * decision below needs to know how much road there is on the far side.
+       *
+       * A car that is turning only follows this lane as far as the junction —
+       * past that it is on a different road entirely. Letting it brake for a
+       * queue beyond its own turn is what left one stopped dead in the middle of
+       * a junction for 86 seconds, held by traffic it was never going to reach.
+       */
+      const turning = car.planned && car.plan !== 0;
+      /** Road left in front of us before we run into the back of the queue. */
+      const queueRoom = this.roomAhead(
+        LANE_KEY(car),
+        car.s,
+        car.dir,
+        spec.l,
+        car,
+        turning ? Math.max(0, toNode) + 0.5 : Infinity,
+      );
+      allowed = Math.min(allowed, queueRoom);
+
+      /*
+       * The junction ahead.
+       *
+       * Four things were wrong with how this used to work, and between them
+       * they are why traffic looked like it ignored the lights.
+       *
+       * It braked to `7.5 + length/2` from the junction *centre*, but the paint
+       * puts the stop line at `crossWidth/2 + 5` — 14.5m out on an avenue. So
+       * every car came to rest four metres past its own stop line, parked
+       * across the zebra. `stopLineAt` is now the one source for both.
+       *
+       * It clamped the stop distance to `max(0, …)`, so a red that caught a car
+       * with its nose already over the line set `allowed` to zero and pinned it
+       * dead in the middle of the box for the next ten seconds, where the cross
+       * street then drove through it. A car past the line is committed: it
+       * clears the junction, which is what a real one does.
+       *
+       * It decided the amber on distance alone, so a car doing 13 m/s would
+       * elect to stop from four metres out — a stop it cannot make in the 1.2s
+       * of amber there used to be. The test is now whether the stop is actually
+       * available at this speed.
+       *
+       * And nothing stopped a car entering a junction it had no room to leave.
+       * That one does not look like a signal fault, it looks like gridlock: the
+       * car gets a green, pulls into the box, the queue on the far side hasn't
+       * moved, and it sits across the intersection for the next cycle and a half
+       * with the cross street stacking up behind it. Measured at 47 seconds
+       * before `keepClear` below. Entering only when you can leave is exactly
+       * what the yellow box on a real junction is asking for.
+       */
       const sig =
         car.axis === 0
           ? this.net.signalAt(car.line, car.node)
           : this.net.signalAt(car.node, car.line);
-      if (sig) {
+      const cross = roadWidth(car.node);
+      const toStop = toNode - stopLineAt(cross) - spec.l / 2;
+      const committed = toStop <= 0.15;
+      if (sig && !committed) {
         const state = lightState(car.axis, sig.offset, t);
-        const stopAt = toNode - (spec.l / 2 + 7.5);
-        if (state === "red" || (state === "amber" && stopAt > 4)) {
-          allowed = Math.min(allowed, Math.max(0, stopAt));
+        const canStop = toStop > (car.v * car.v) / (2 * BRAKE) + 0.5;
+
+        /*
+         * Room to put our tail past the far kerb and still hold a gap.
+         *
+         * For a car going straight that is the queue in its own lane. For one
+         * that is turning it is the queue on the road it is turning *into* —
+         * which is a different lane bucket entirely, and measuring the wrong one
+         * is how a car still ended up parked across the middle of a junction for
+         * 23 seconds after the straight-ahead case was fixed. It had turned into
+         * a road that was already backed up to the kerb.
+         */
+        let keepClear: boolean;
+        if (turning) {
+          const newAxis: 0 | 1 = car.axis === 0 ? 1 : 0;
+          const newDir = (car.axis === 0 ? car.dir * car.plan : -car.dir * car.plan) as 1 | -1;
+          const newLine = car.node;
+          const newLane = Math.min(car.lane, laneCount(newLine) - 1);
+          // where `applyPlan` will drop us, and which way out of the box
+          const s0 = car.line * CELL;
+          const exit = this.roomAhead(
+            LANE_ID(newAxis, newLine, newDir, newLane),
+            s0,
+            newDir,
+            spec.l,
+          );
+          keepClear = exit < roadWidth(car.line) / 2 + spec.l / 2 + 1.5;
+        } else {
+          keepClear = queueRoom < toNode + cross / 2 + spec.l / 2 + 1.5;
+        }
+        /*
+         * Don't enter a box somebody else is still in either. The all-red
+         * interval covers the ordinary hand-over; this covers the rest — a bus
+         * part-way through a turn, or a car that took the amber late.
+         */
+        const mask = this.busy.get(
+          car.axis === 0
+            ? NODE_KEY(car.line, car.node)
+            : NODE_KEY(car.node, car.line),
+        );
+        const occupied = mask !== undefined && (mask & ~(1 << car.axis)) !== 0;
+
+        if (state === "red" || (state === "amber" && canStop) || keepClear || occupied) {
+          allowed = Math.min(allowed, toStop);
         }
       }
       // a dead end we have no plan through
       if (car.planned && car.plan === 0 && !this.segmentAhead(car.axis, car.line, car.node, car.dir)) {
         allowed = Math.min(allowed, Math.max(0, toNode - spec.l));
-      }
-
-      // the car in front, in our own lane
-      const lane = this.buckets.get(LANE_KEY(car));
-      if (lane) {
-        for (const o of lane) {
-          if (o === car) continue;
-          const gap = (o.s - car.s) * car.dir;
-          if (gap > 0) {
-            allowed = Math.min(allowed, gap - (spec.l / 2 + VEHICLES[o.spec].l / 2 + 2.2));
-          }
-        }
       }
 
       /*
@@ -885,11 +1034,13 @@ export class Traffic {
 
       /* ---- longitudinal control ---- */
       // target speed from the distance we're cleared for, capped by the limit
-      const safe = allowed === Infinity ? car.vMax : Math.sqrt(Math.max(0, allowed) * 2 * 6.5);
+      const safe =
+        allowed === Infinity ? car.vMax : Math.sqrt(Math.max(0, allowed) * 2 * BRAKE);
       // ease off through a turn
-      const turning = car.planned && car.plan !== 0 && toNode < 18 ? 0.45 : 1;
-      const want = Math.min(car.vMax * turning, safe);
+      const corner = turning && toNode < 18 ? 0.45 : 1;
+      const want = Math.min(car.vMax * corner, safe);
       const rate = want < car.v ? 9 : 3.4;
+      const braking = want < car.v - 0.35 || car.v < 0.6;
       car.v += (want - car.v) * (1 - Math.exp(-rate * dt));
       if (car.v < 0.02) car.v = 0;
 
@@ -906,7 +1057,7 @@ export class Traffic {
       }
 
       const [px, pz] = this.place(car.axis, car.line, car.lane, car.dir, car.s);
-      this.write(i, spec, px, pz, this.yawOf(car.axis, car.dir), car.colour, night > 0.25);
+      this.write(i, spec, px, pz, this.yawOf(car.axis, car.dir), car.colour, braking);
     }
 
     for (const m of [
