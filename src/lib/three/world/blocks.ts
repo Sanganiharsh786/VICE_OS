@@ -380,7 +380,8 @@ function carPark(ctx: WorldCtx, rnd: Rnd, x0: number, x1: number, z0: number, z1
       mark.ground(px, pz, alongX ? 0.14 : 5.4, alongX ? 5.4 : 0.14, PAVE_Y + 0.04, {
         tint: 0xd8d4c4,
       });
-      if (rnd() > 0.38) {
+      // a little over a third of the bays taken — a full lot reads as a wall
+      if (rnd() > 0.62) {
         ctx.parked.push({
           x: px + (alongX ? 1.45 : 0),
           z: pz + (alongX ? 0 : 1.45),
@@ -578,6 +579,13 @@ function furniture(
     const z = axis === "x" ? fixed : t;
     const roll = rnd();
 
+    /*
+     * Every piece of this is solid. None of it used to be — the bus shelter was
+     * the only thing on the pavement with a collider, so a bench, a bin, a
+     * hydrant and a stack of news boxes were all scenery you walked straight
+     * through. Tops are the real height of the prop, which is what decides
+     * whether you have to go round it or can jump it.
+     */
     if (roll < 0.26) {
       // bench facing the road
       prop.box(x, PAVE_Y + 0.46, z, axis === "x" ? 1.8 : 0.6, 0.1, axis === "x" ? 0.6 : 1.8, {
@@ -592,11 +600,14 @@ function furniture(
         axis === "x" ? 0.12 : 1.8,
         { tint: 0x6b5030 },
       );
+      ctx.grid.box(x, z, axis === "x" ? 1.8 : 0.72, axis === "x" ? 0.72 : 1.8, 1.02);
     } else if (roll < 0.48) {
       prop.cylinder(x, PAVE_Y + 0.55, z, 0.34, 0.38, 1.1, 8, 0x3f3b4a, 0.3);
+      ctx.grid.box(x, z, 0.76, 0.76, 0.93);
     } else if (roll < 0.58) {
       prop.cylinder(x, PAVE_Y + 0.38, z, 0.17, 0.15, 0.76, 6, 0xc23a2a, 0.2);
       prop.box(x, PAVE_Y + 0.8, z, 0.5, 0.14, 0.2, { tint: 0xc23a2a });
+      ctx.grid.box(x, z, 0.5, 0.5, 0.87);
     } else if (roll < 0.68 && spec.crowd > 0.6) {
       // bus shelter, glazed back, lit panel
       prop.box(x, PAVE_Y + 1.35, z, axis === "x" ? 4.2 : 1.6, 0.1, axis === "x" ? 1.6 : 4.2, {
@@ -630,6 +641,9 @@ function furniture(
       prop.box(x, PAVE_Y + 2.2, z, axis === "x" ? 0.7 : 0.06, 0.5, axis === "x" ? 0.06 : 0.7, {
         tint: 0xb8b2c0,
       });
+      // thin enough to walk round, not thin enough to walk through, and tall
+      // enough that a jump can't leave you standing on top of a pole
+      ctx.grid.box(x, z, 0.34, 0.34, 2.4);
     } else if (roll < 0.84) {
       // newspaper boxes, clustered
       for (let b = 0; b < 3; b++) {
@@ -643,6 +657,13 @@ function furniture(
           { tint: pick(rnd, [0xc4392a, 0x2a6bc4, 0x2ac47a]) },
         );
       }
+      ctx.grid.box(
+        x + (axis === "x" ? 0.65 : 0),
+        z + (axis === "x" ? 0 : 0.65),
+        axis === "x" ? 1.85 : 0.55,
+        axis === "x" ? 0.55 : 1.85,
+        0.99,
+      );
     }
   }
 }
@@ -664,8 +685,9 @@ function kerbParking(
 ) {
   if (spec.traffic < 0.25) return;
   const lane = roadCentre + side * (width / 2 - 1.9);
-  for (let t = from + 6; t < to - 6; t += range(rnd, 6.2, 12)) {
-    if (rnd() > 0.55) continue;
+  // gaps at the kerb, so the street has somewhere to step off into
+  for (let t = from + 6; t < to - 6; t += range(rnd, 7.5, 14)) {
+    if (rnd() > 0.32) continue;
     ctx.parked.push({
       x: axis === "x" ? t : lane,
       z: axis === "x" ? lane : t,

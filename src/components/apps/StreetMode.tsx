@@ -42,7 +42,6 @@ const TIME_LABEL: Record<TimeMode, string> = {
   auto: "AUTO",
   day: "DAY",
   sunset: "SUNSET",
-  night: "NIGHT",
 };
 
 const CAMERA_LABEL: Record<CameraMode, string> = {
@@ -69,7 +68,7 @@ const KEYS: [string, string][] = [
   ["ENTER", "take the shot"],
   ["C", "camera distance"],
   ["T  ·  1-9", "travel across the city"],
-  ["N", "daylight / sunset / night"],
+  ["N", "daylight / sunset"],
   ["[  ]", "scrub the clock"],
   ["X", "back to the seafront"],
   ["H", "this list"],
@@ -336,7 +335,7 @@ export default function StreetMode({
           <button
             onClick={() => engineRef.current?.cycleTimeMode()}
             className="glass-deep rounded-xl px-3 py-2 font-mono text-[9px] tracking-[0.18em] text-vice-cyan transition hover:text-white"
-            title="Daylight / sunset / night (N)"
+            title="Daylight / sunset (N)"
           >
             {TIME_LABEL[stats.timeMode]}
           </button>

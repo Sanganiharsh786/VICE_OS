@@ -100,6 +100,7 @@ export default function EditorStage({
   evidence = EMPTY_EVIDENCE,
   onCommit,
   onCancel,
+  onStreet,
 }: {
   image: string;
   mission: StageMission;
@@ -119,6 +120,13 @@ export default function EditorStage({
     reel: ReelFrame[],
   ) => void;
   onCancel: () => void;
+  /**
+   * Present when this frame came in from Leonida Live. The lab is a full-screen
+   * stage with no phone chrome around it, so without this the only way back to
+   * the 3D street is out through the film roll — which is not a route anyone
+   * finds on their own.
+   */
+  onStreet?: () => void;
 }) {
   const ref = useRef<ImageEditorRef>(null);
   const stage = useRef<HTMLDivElement>(null);
@@ -289,6 +297,15 @@ export default function EditorStage({
               title="Put the untouched capture back on the canvas and take another run at it"
             >
               START OVER
+            </button>
+          )}
+          {onStreet && (
+            <button
+              onClick={onStreet}
+              className="rounded-lg border border-vice-cyan/35 px-3 py-2 font-mono text-[10px] tracking-[0.2em] text-vice-cyan/80 transition hover:border-vice-cyan hover:text-vice-cyan"
+              title="Back to Leonida Live — the frame stays in your roll"
+            >
+              ← STREET
             </button>
           )}
           <button

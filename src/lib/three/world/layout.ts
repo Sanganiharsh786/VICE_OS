@@ -12,6 +12,10 @@
  * instead of wandering.
  */
 
+// Type-only: the sound bank owns the list of surfaces, and the layout is what
+// can answer which one you are standing on.
+import type { Surface } from "@/lib/audio";
+
 /** Size of one city cell, in metres. Block interior + the road around it. */
 export const CELL = 80;
 /** Cells per axis. */
@@ -115,6 +119,51 @@ export function cellOf(x: number, z: number): [number, number] {
 export function terrainOfPoint(x: number, z: number): Terrain {
   const [i, j] = cellOf(x, z);
   return terrainAt(i, j);
+}
+
+/**
+ * What a foot landing here would hit, for footstep audio.
+ *
+ * Derived from the layout rather than looked up in the geometry: the world is
+ * welded into a handful of merged buffers by the time anyone walks on it, so
+ * there is no mesh left to ask. The road test is the same one the roads are
+ * built from — a point is on tarmac when it is inside half a road width of a
+ * centre line — which means the sound changes on exactly the metre the kerb
+ * is drawn at.
+ *
+ * `y` is the height the foot ended up at. Anything well above the kerb is
+ * something the player has climbed onto rather than the ground.
+ */
+export function surfaceAt(x: number, z: number, y = 0): Surface {
+  // a bench, a bin, a car roof — whatever it is, it is not the pavement
+  if (y > 0.5) return "metal";
+
+  const kx = Math.round(x / CELL);
+  const kz = Math.round(z / CELL);
+  if (
+    Math.abs(kx) <= HALF &&
+    Math.abs(x - kx * CELL) < roadWidth(kx) / 2
+  )
+    return "road";
+  if (
+    Math.abs(kz) <= HALF &&
+    Math.abs(z - kz * CELL) < roadWidth(kz) / 2
+  )
+    return "road";
+
+  switch (terrainOfPoint(x, z)) {
+    case "beach":
+      return "sand";
+    case "park":
+      return "grass";
+    // the harbour and the marina are decked, not paved
+    case "harbor":
+    case "marina":
+    case "water":
+      return "wood";
+    default:
+      return "pavement";
+  }
 }
 
 /** Land you can build on and drive through. */

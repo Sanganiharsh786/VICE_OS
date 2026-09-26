@@ -23,6 +23,7 @@ export default function ForensicVision({
   evidence,
   onOpenLab,
   onDiscard,
+  onStreet,
 }: {
   src: string;
   title: string;
@@ -30,6 +31,8 @@ export default function ForensicVision({
   evidence: Evidence[];
   onOpenLab: () => void;
   onDiscard: () => void;
+  /** Present when this frame was shot in Leonida Live — goes back to it. */
+  onStreet?: () => void;
 }) {
   const [step, setStep] = useState(0);
   const total = evidence.length;
@@ -67,6 +70,15 @@ export default function ForensicVision({
             {done ? "FRAME ANALYSED" : "SCANNING FRAME…"} · {location}
           </p>
         </div>
+        {onStreet && (
+          <button
+            onClick={onStreet}
+            className="rounded-lg border border-vice-cyan/35 px-3 py-2 font-mono text-[10px] tracking-[0.2em] text-vice-cyan/80 transition hover:border-vice-cyan hover:text-vice-cyan"
+            title="Back to Leonida Live — the frame stays in your roll"
+          >
+            ← STREET
+          </button>
+        )}
         <button
           onClick={onDiscard}
           className="rounded-lg border border-white/15 px-3 py-2 font-mono text-[10px] tracking-[0.2em] text-white/55 transition hover:border-white/40 hover:text-white"

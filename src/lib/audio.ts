@@ -173,9 +173,79 @@ function burst({
   src.stop(t + dur + 0.05);
 }
 
+/* -------------------------------------------------------------- footsteps */
+
+/**
+ * What the foot landed on. The street is the only place these come from, so
+ * the list is exactly the ground Leonida is made of.
+ */
+export type Surface = "road" | "pavement" | "sand" | "grass" | "wood" | "metal";
+
+/**
+ * One footstep per surface: a body and a scuff.
+ *
+ * Every real footstep is two events a few milliseconds apart — the heel
+ * arriving, which is pitched and short, and the sole scraping, which is
+ * broadband. Synthesising them separately is what stops these sounding like a
+ * drum machine: the pair is what your ear reads as a shoe.
+ *
+ * `body` is a pitched thump (Hz, and how far it falls); `scuff` is a filtered
+ * noise burst (centre Hz, Q, seconds, and how loud relative to the body).
+ * `bright` lifts the whole step so a boardwalk cuts through over sand.
+ */
+const STEPS: Record<
+  Surface,
+  { body: [number, number]; thump: number; scuff: [number, number, number, number]; bright: number }
+> = {
+  // asphalt: almost no pitch to it, a dull slap
+  road: { body: [128, 96], thump: 0.045, scuff: [1500, 0.9, 0.05, 0.7], bright: 0.9 },
+  // concrete slabs ring a little, and the scuff is grittier and higher
+  pavement: { body: [168, 118], thump: 0.05, scuff: [2700, 1.1, 0.045, 0.85], bright: 1 },
+  // no body at all — dry sand is pure hiss, and it takes longer to stop
+  sand: { body: [90, 70], thump: 0.03, scuff: [3800, 0.45, 0.13, 1.5], bright: 0.75 },
+  grass: { body: [110, 82], thump: 0.035, scuff: [2300, 0.5, 0.1, 1.1], bright: 0.8 },
+  // a boardwalk is a drum with a person standing on it
+  wood: { body: [232, 152], thump: 0.095, scuff: [1900, 1.4, 0.05, 0.5], bright: 1.15 },
+  // stepping onto a car roof or a container, which should sound like a mistake
+  metal: { body: [640, 430], thump: 0.075, scuff: [4600, 2.2, 0.05, 0.6], bright: 1.2 },
+};
+
 /* ----------------------------------------------------------------- sounds */
 
 export const sfx = {
+  /**
+   * A foot landing. Called from the locomotion solver's heel strike, so the
+   * sound is on the frame the foot is actually planted rather than on a timer.
+   *
+   * `speed` is metres per second — a walk is ~1.5, a sprint ~5. It scales the
+   * level, and every step is detuned a few percent so a corridor's worth of
+   * them never turns into a metronome.
+   */
+  footstep(surface: Surface, speed: number) {
+    const s = STEPS[surface];
+    const effort = Math.min(1, Math.max(0, speed / 5.1));
+    const gain = (0.05 + effort * 0.085) * s.bright;
+    // ±6% on pitch, ±15% on level: two identical steps in a row is the tell
+    const detune = 0.94 + Math.random() * 0.12;
+    const vary = 0.85 + Math.random() * 0.3;
+
+    tone({
+      type: "sine",
+      from: s.body[0] * detune,
+      to: s.body[1] * detune,
+      dur: s.thump,
+      gain: gain * vary,
+    });
+    burst({
+      dur: s.scuff[2],
+      gain: gain * s.scuff[3] * vary,
+      freq: s.scuff[0] * detune,
+      q: s.scuff[1],
+      // the scuff follows the heel rather than landing with it
+      delay: 0.012,
+    });
+  },
+
   /** Soft UI tick — app icons, list rows. */
   tap() {
     tone({ type: "triangle", from: 880, to: 1180, dur: 0.055, gain: 0.1 });

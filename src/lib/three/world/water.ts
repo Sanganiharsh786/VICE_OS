@@ -162,10 +162,40 @@ export function buildCoast(ctx: WorldCtx) {
   /* -------- boardwalk down the whole coast -------- */
   const bw = SAND_X - 5.5;
   paveB.box(bw, PAVE_Y / 2, 0, 10, PAVE_Y, depth, { uvScale: [3, 3], shade: false });
-  propB.box(bw + 5.2, PAVE_Y + 0.5, 0, 0.2, 1.0, depth, { tint: 0x6b5a44 });
-  for (let z = Z_TOP + 12; z < Z_BOT; z += 14) {
-    // rail posts
-    propB.box(bw + 5.2, PAVE_Y + 0.5, z, 0.3, 1.1, 0.3, { tint: 0x5a4a38 });
+  ctx.grid.box(bw, 0, 10, depth, PAVE_Y);
+
+  /*
+   * The sea rail, in segments.
+   *
+   * It used to be one box a kilometre long with no collider at all, which is
+   * why you could walk off the boardwalk straight through it and onto the
+   * sand. It is solid now — but a solid kilometre of fence would seal the
+   * beach off, so every fourth segment is left open as beach access.
+   *
+   * Rail height is set by the jump, and it has to work from *both* sides.
+   *
+   * The boardwalk deck stands 0.19 above the sand, so the same jump reaches
+   * 1.04 leaving the deck and only 0.85 leaving the beach. At an 0.95 collider
+   * that vaulted out and then stranded you on the sand, which is a worse bug
+   * than the fence being see-through. 0.80 clears from the low side with a
+   * 0.23s window and from the high side with 0.37s — comfortable either way.
+   */
+  const SEG = 14;
+  const RAIL_H = 0.74;
+  const RAIL_TOP = 0.8;
+  for (let z = Z_TOP; z < Z_BOT; z += SEG) {
+    const n = Math.round((z - Z_TOP) / SEG);
+    const span = Math.min(SEG, Z_BOT - z);
+    // a post at every joint, open segment or not
+    propB.box(bw + 5.2, PAVE_Y + RAIL_H / 2, z, 0.3, RAIL_H + 0.1, 0.3, {
+      tint: 0x5a4a38,
+    });
+    if (n % 4 !== 3) {
+      propB.box(bw + 5.2, PAVE_Y + RAIL_H / 2, z + span / 2, 0.2, RAIL_H, span, {
+        tint: 0x6b5a44,
+      });
+      ctx.grid.box(bw + 5.2, z + span / 2, 0.44, span, RAIL_TOP);
+    }
     ctx.walk.push(new THREE.Vector3(bw + range(rnd, -3.5, 3.5), PAVE_Y, z));
     ctx.walk.push(new THREE.Vector3(bw + range(rnd, -3.5, 3.5), PAVE_Y, z + 7));
   }
@@ -234,6 +264,7 @@ export function buildCoast(ctx: WorldCtx) {
     propB.cylinder(bw - 4.2, 3.2, z, 0.14, 0.1, 6.4, 6, 0x35323f, 0.4);
     neonB.blob(bw - 4.2, 6.6, z, 0.4, 0.5, 0.4, 6, 2, 0xffd9a0);
     poolB.ground(bw - 4.2, z, 18, 18, PAVE_Y + 0.04, { tint: 0x5a3c20, uvScale: 18 });
+    ctx.grid.box(bw - 4.2, z, 0.5, 0.5, 6.4);
     ctx.lamps.push({ x: bw - 4.2, z, h: 6.6 });
   }
 }
@@ -252,6 +283,9 @@ function pier(ctx: WorldCtx, rnd: Rnd, cz: number) {
     for (const oz of [-4.6, 4.6]) {
       propB.cylinder(x, (deck - 4) / 2, cz + oz, 0.4, 0.34, deck + 4, 6, 0x4a3a2c, 0.45);
       propB.box(x, deck + 0.9, cz + oz, 0.22, 1.2, 0.22, { tint: 0x6b5a44 });
+      // the piles are solid; the deck 3.2m overhead is not, so you can walk
+      // under the pier along the beach the way you would under a real one
+      ctx.grid.box(x, cz + oz, 0.9, 0.9, 1.15);
     }
     propB.box(x + 4.5, deck + 1.35, cz - 4.6, 9, 0.16, 0.16, { tint: 0x6b5a44 });
     propB.box(x + 4.5, deck + 1.35, cz + 4.6, 9, 0.16, 0.16, { tint: 0x6b5a44 });

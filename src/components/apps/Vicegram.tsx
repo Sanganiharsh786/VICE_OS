@@ -64,6 +64,12 @@ type Frame = {
    * deal with.
    */
   evidence: Evidence[];
+  /**
+   * True when this frame was shot in Leonida Live rather than picked off the
+   * roll or imported. It is what lets every stage downstream offer a way
+   * straight back into the 3D street instead of dumping you in the film roll.
+   */
+  fromStreet?: boolean;
 };
 
 type Scanned = Frame & {
@@ -113,6 +119,7 @@ export default function Vicegram({
       title: photo.title,
       location: photo.location,
       evidence: photo.evidence,
+      fromStreet: true,
     };
     vice.dispatch({ type: "captured", frame });
     vice.mark("shot");
@@ -132,6 +139,7 @@ export default function Vicegram({
       location: mode.location,
       sceneId: mode.sceneId,
       evidence: mode.evidence,
+      fromStreet: mode.fromStreet,
     };
     setMode({ k: "scan", ...frame, src: dataUrl, original: mode.src });
 
@@ -169,6 +177,7 @@ export default function Vicegram({
       location: m.location,
       sceneId: m.sceneId,
       evidence: m.evidence,
+      fromStreet: m.fromStreet,
     });
 
   /* ---- publish + consequences ---- */
@@ -359,6 +368,7 @@ export default function Vicegram({
       location: mode.location,
       sceneId: mode.sceneId,
       evidence: mode.evidence,
+      fromStreet: mode.fromStreet,
     };
     return (
       <ForensicVision
@@ -370,7 +380,8 @@ export default function Vicegram({
           vice.mark("vision");
           setMode({ k: "edit", ...frame });
         }}
-        onDiscard={() => setMode({ k: "roll" })}
+        onStreet={mode.fromStreet ? () => setMode({ k: "street" }) : undefined}
+        onDiscard={() => setMode(mode.fromStreet ? { k: "street" } : { k: "roll" })}
       />
     );
   }
@@ -404,7 +415,8 @@ export default function Vicegram({
           surface: "forensics",
         }}
         onCommit={onCommit}
-        onCancel={() => setMode({ k: "roll" })}
+        onStreet={mode.fromStreet ? () => setMode({ k: "street" }) : undefined}
+        onCancel={() => setMode(mode.fromStreet ? { k: "street" } : { k: "roll" })}
       />
     );
   }
@@ -504,6 +516,7 @@ function modeAsScanned(m: Scanned & { k: string }): Scanned {
     location: m.location,
     sceneId: m.sceneId,
     evidence: m.evidence,
+    fromStreet: m.fromStreet,
     report: m.report,
     timeline: m.timeline,
     reel: m.reel,

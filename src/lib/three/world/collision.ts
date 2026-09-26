@@ -21,9 +21,36 @@ export type Collider = {
   maxZ: number;
   /** Top of the box. Actors clear anything shorter than a kerb. */
   top: number;
+  /**
+   * Stops a body but not a sightline. Parked cars are the only thing marked
+   * this way: they have to be solid to walk into and to land on, but the
+   * shutter has always been able to read a number plate down a row of them,
+   * and that is a game rule rather than an optics one.
+   */
+  seeThrough?: boolean;
 };
 
 const BUCKET = 40;
+
+/**
+ * How far above an actor's feet a box's top can be and still be walked onto
+ * rather than walked into — a kerb, a pavement lip, a low step.
+ */
+export const STEP_UP = 0.55;
+
+/**
+ * The same allowance while airborne — how far a prop's top may exceed your feet
+ * and still be cleared. Read it as how much the character tucks up in the air.
+ *
+ * This is what decides whether a vault is a move you can time. A jump peaks at
+ * 0.85 and a body is 0.72 across, so at a small allowance the window where you
+ * are above an obstacle is shorter than the time it takes to cross it, and only
+ * a frame-perfect jump gets over anything — which is exactly how the boardwalk
+ * rail ended up clearable from the high side and not the low one. At 0.28 the
+ * lowest thing you still cannot clear is a parked car's roof, and that is the
+ * line this wants to sit just under.
+ */
+export const AIR_CLEAR = 0.28;
 
 export class CollisionGrid {
   private cells = new Map<number, Collider[]>();
@@ -55,6 +82,7 @@ export class CollisionGrid {
     w: number,
     d: number,
     top = 40,
+    seeThrough = false,
   ) {
     this.add({
       minX: cx - w / 2,
@@ -62,6 +90,7 @@ export class CollisionGrid {
       minZ: cz - d / 2,
       maxZ: cz + d / 2,
       top,
+      seeThrough,
     });
   }
 
@@ -93,6 +122,7 @@ export class CollisionGrid {
     from: THREE.Vector3,
     to: THREE.Vector3,
     minTop = 1.2,
+    skipSeeThrough = false,
   ): number {
     const dx = to.x - from.x;
     const dz = to.z - from.z;
@@ -116,6 +146,7 @@ export class CollisionGrid {
           if (!arr) continue;
           for (const c of arr) {
             if (c.top < minTop || seen.has(c)) continue;
+            if (skipSeeThrough && c.seeThrough) continue;
             seen.add(c);
             const hit = slab(from, dx, dy, dz, c);
             if (hit >= 0 && (best < 0 || hit < best)) best = hit;
@@ -128,17 +159,44 @@ export class CollisionGrid {
   }
 
   blocked(from: THREE.Vector3, to: THREE.Vector3, slack = 0.3) {
-    const hit = this.rayHit(from, to);
+    const hit = this.rayHit(from, to, 1.2, true);
     return hit >= 0 && hit < from.distanceTo(to) - slack;
   }
 
-  /** Push a capsule out of every box it overlaps. Returns true if it moved. */
-  resolve(pos: THREE.Vector3, radius: number, scratch: Collider[]) {
+  /**
+   * Height of the highest surface under (x, z) that an actor could be standing
+   * on. `clearTop` is the same number `resolve` ignores boxes below, so the two
+   * always agree: anything that can't push you is something you stand on top of.
+   */
+  groundAt(x: number, z: number, clearTop: number, scratch: Collider[]) {
+    this.near(x, z, scratch);
+    let y = 0;
+    for (const c of scratch) {
+      if (c.top > clearTop || c.top <= y) continue;
+      if (x < c.minX || x > c.maxX || z < c.minZ || z > c.maxZ) continue;
+      y = c.top;
+    }
+    return y;
+  }
+
+  /**
+   * Push a capsule out of every box it overlaps. Returns true if it moved.
+   *
+   * Boxes whose top is at or below `clearTop` are ignored — that is the whole
+   * of the height test. Standing on the pavement it is a kerb's worth above the
+   * feet, so low geometry never shoves you; at the top of a jump it rises with
+   * the player, which is what lets a jump actually clear a bin or a bench.
+   */
+  resolve(
+    pos: THREE.Vector3,
+    radius: number,
+    scratch: Collider[],
+    clearTop = STEP_UP,
+  ) {
     this.near(pos.x, pos.z, scratch);
     let moved = false;
     for (const c of scratch) {
-      // anything you can step over doesn't push you around
-      if (c.top < 0.55) continue;
+      if (c.top <= clearTop) continue;
       if (
         pos.x < c.minX - radius ||
         pos.x > c.maxX + radius ||

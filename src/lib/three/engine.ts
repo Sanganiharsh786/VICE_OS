@@ -30,7 +30,8 @@ import {
   type EvidenceTag,
   type TimeMode,
 } from "./city";
-import { LANDMARK_SPOTS, districtAt, placeName } from "./world/layout";
+import { LANDMARK_SPOTS, districtAt, placeName, surfaceAt } from "./world/layout";
+import { sfx } from "../audio";
 import type { Evidence } from "../evidence";
 
 export type Quality = "high" | "low";
@@ -54,7 +55,7 @@ export type Stats = {
   camYaw: number;
   /** 0..1 through the day. */
   timeOfDay: number;
-  /** Whether the clock is running, or pinned to day / sunset / night. */
+  /** Whether the clock is running, or pinned to day / sunset. */
   timeMode: TimeMode;
   camera: CameraMode;
 };
@@ -71,6 +72,23 @@ const CAPTURE_H = 1350;
 
 const _head = new THREE.Vector3();
 const _ray = new THREE.Vector3();
+/** Roof height of whatever traffic the camera boom last ran into. */
+const _carHit = { top: 0 };
+
+/**
+ * Height below which the third-person camera does not treat geometry as a wall.
+ *
+ * Street furniture, parked cars, palms and bus shelters are all shorter than
+ * this: the lens passing through a hedge for a moment is nothing, being yanked
+ * onto the player's shoulder every time they walk past a parked car is awful.
+ * Anything that reads as an actual wall — buildings, lamp columns, containers,
+ * the landmarks — stands well above it.
+ *
+ * This replaces the old trick of giving those props deliberately short
+ * colliders to stay under the ray's threshold, which made them dishonest to
+ * the jump as well as to the camera.
+ */
+const CAMERA_CLEAR = 2.6;
 
 /**
  * Third-person framings. `dist` is how far the lens sits behind the player,
@@ -143,6 +161,10 @@ type Ped = {
   target: THREE.Vector3;
   wait: number;
   scared: number;
+  /** Seconds spent trying to walk and getting nowhere. */
+  stuck: number;
+  lastX: number;
+  lastZ: number;
 };
 
 const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -192,6 +214,10 @@ export class StreetEngine {
   private camPitch = 0.12;
   private camPos = new THREE.Vector3();
   private camLook = new THREE.Vector3();
+  /** How far the boom is craned up to see over traffic crossing behind. */
+  private camRise = 0;
+  /** Height the lens is riding above the rig to clear a vehicle it is inside. */
+  private camLift = 0;
   private fov = 58;
   private camMode: CameraMode = "shoulder";
   /** Extra yaw from the keyboard turn keys, applied per frame. */
@@ -252,6 +278,20 @@ export class StreetEngine {
     });
     this.scene.add(hero.group);
     this.player = new Actor(hero);
+    // The player can end up on a kerb, a bench or the roof of a car; the crowd
+    // only ever walks the pavement, so traffic is left out of their probe.
+    this.player.setGroundProbe((x, z, top) => this.city.groundAt(x, z, top));
+    /*
+     * Footsteps come straight off the gait solver's heel strike rather than a
+     * timer, so they stay locked to the feet at every speed, and the surface
+     * is read at the foot rather than at the pelvis — which is the difference
+     * between the sand starting when you cross the kerb and when your shoulder
+     * does. The crowd is deliberately silent: seven people walking in step
+     * with you is a much worse artefact than a quiet street.
+     */
+    this.player.onFootstep((_foot, pos, speed) => {
+      sfx.footstep(surfaceAt(pos.x, pos.z, this.player.pos.y), speed);
+    });
     this.player.teleport(this.city.spawn.x, this.city.spawn.z, this.city.spawn.yaw);
     this.camYaw = this.city.spawn.yaw;
 
@@ -271,6 +311,7 @@ export class StreetEngine {
       });
       this.scene.add(c.group);
       const a = new Actor(c);
+      a.setGroundProbe((x, z, top) => this.city.walkableAt(x, z, top));
       const w = this.pickWaypoint(true);
       a.teleport(w.x, w.z, Math.random() * 7);
       this.peds.push({
@@ -278,6 +319,9 @@ export class StreetEngine {
         target: this.pickWaypoint(),
         wait: 0,
         scared: 0,
+        stuck: 0,
+        lastX: a.pos.x,
+        lastZ: a.pos.z,
       });
       this.evidence.push({
         kind: "FACE",
@@ -401,7 +445,7 @@ export class StreetEngine {
    *   Q E               turn camera   R F    look up/down
    *   C                 camera mode   F      raise the phone
    *   T                 fast travel   1-9    jump to a landmark
-   *   [ ]               scrub time    N      flip day / night
+   *   [ ]               scrub time    N      flip day / sunset
    *   X                 back to spawn
    */
   private onKeyDown = (e: KeyboardEvent) => {
@@ -471,7 +515,7 @@ export class StreetEngine {
     if (!spot) return;
     this.travelIdx = LANDMARK_SPOTS.indexOf(spot);
     this.player.teleport(spot.x, spot.z, this.camYaw);
-    resolveCollisions(this.player.pos, 0.36, this.city.grid);
+    resolveCollisions(this.player.pos, 0.36, this.city.grid, this.player.clearTop);
     // pull the rigged crowd along so the new district isn't deserted
     for (const ped of this.peds) {
       const w = this.pickWaypoint(true);
@@ -490,7 +534,7 @@ export class StreetEngine {
     this.camMode = mode;
   }
 
-  /** Steps the lighting: auto -> day -> sunset -> night. */
+  /** Steps the lighting: auto -> day -> sunset. */
   cycleTimeMode() {
     const mode = this.city.cycleTimeMode();
     this.onEvent({ kind: "time", mode });
@@ -694,7 +738,27 @@ export class StreetEngine {
             ? p
             : null,
       });
-      resolveCollisions(a.pos, 0.32, this.city.grid);
+      resolveCollisions(a.pos, 0.32, this.city.grid, a.clearTop);
+
+      /*
+       * The pavement furniture sits on the same line as the walk nodes, and
+       * these pedestrians steer straight at their target with no avoidance. A
+       * bench they happen to line up with would otherwise hold one of them
+       * against it forever, so a walker that stops making ground picks
+       * somewhere else to be.
+       */
+      const made = Math.hypot(a.pos.x - ped.lastX, a.pos.z - ped.lastZ);
+      ped.lastX = a.pos.x;
+      ped.lastZ = a.pos.z;
+      if ((mx || mz) && made < 0.35 * dt) {
+        ped.stuck += dt;
+        if (ped.stuck > 1.2) {
+          ped.target = this.pickWaypoint();
+          ped.stuck = 0;
+        }
+      } else {
+        ped.stuck = 0;
+      }
     }
   }
 
@@ -771,14 +835,62 @@ export class StreetEngine {
       );
 
       /*
-       * Keep the camera out of the walls. This used to be a full-scene
-       * raycast, which at forty objects was fine and at four thousand was the
-       * most expensive thing in the frame — it is now a slab test against the
-       * collision grid, which touches maybe a dozen boxes.
+       * Traffic needs the opposite answer to a wall, because it is a different
+       * shape of problem.
+       *
+       * A building is taller than the boom can ever climb, so the only way
+       * past it is to come in. A vehicle is two to four metres of box sitting
+       * on a road the lens is already looking over — craning up until the
+       * boom clears its roof keeps the entire shot, where coming in would jam
+       * the lens against the player's back for as long as the thing takes to
+       * pass, and a bus is eleven metres long. That is how the frame ended up
+       * as a black slab: the rig had no answer for traffic at all, so an
+       * articulated truck drove straight through the lens.
+       *
+       * The maths: the boom is a straight line from `focus` to `want` and the
+       * blocker sits a known fraction `t` along it, so raising the far end by
+       * R lifts the line at the blocker by t*R. Solve for the R that puts it
+       * over the roof. A blocker very close to the player needs an absurd R —
+       * that is capped, and past the cap we let the wall test below pull in,
+       * which is what used to happen in every case.
+       *
+       * `want` is probed before it is raised, deliberately. Probing the raised
+       * boom would report the road clear the moment the crane worked, drop the
+       * rig back into the bus, and buzz at frame rate.
        */
       const reach = focus.distanceTo(want);
-      const hit = this.city.rayHit(focus, want);
-      if (hit >= 0 && hit < reach) {
+      const carHit = this.city.vehicleHit(focus, want, CAMERA_CLEAR, _carHit);
+      let rise = 0;
+      if (carHit >= 0 && carHit < reach) {
+        const t = Math.max(carHit / reach, 1e-3);
+        rise = Math.min(
+          Math.max((_carHit.top + 0.55 - focus.y) / t + focus.y - want.y, 0),
+          dist * 0.9,
+        );
+      }
+      /*
+       * Rate-limited rather than damped. A bus entering the boom — or the
+       * traffic sim recycling one into it, which happens without warning —
+       * steps this target from nothing to several metres between one frame
+       * and the next, and an exponential chase turns that into a visible pop.
+       * A ceiling in metres per second turns the same event into a crane.
+       * Up faster than down, so the rig commits quickly and settles back
+       * slowly rather than dropping the moment the tail clears. Anything that
+       * outruns the crane is caught by the lift further down.
+       */
+      const rate = (rise > this.camRise ? 9 : 2.4) * dt;
+      this.camRise += THREE.MathUtils.clamp(rise - this.camRise, -rate, rate);
+      want.y += this.camRise;
+
+      /*
+       * Then the walls. This used to be a full-scene raycast, which at forty
+       * objects was fine and at four thousand was the most expensive thing in
+       * the frame — it is now a slab test against the collision grid, which
+       * touches maybe a dozen boxes. It still asks the traffic sim too, for
+       * whatever the crane above could not clear.
+       */
+      const hit = this.city.rayHit(focus, want, CAMERA_CLEAR);
+      if (hit >= 0 && hit < focus.distanceTo(want)) {
         // the direction has to be taken before `want` is overwritten — doing it
         // inline collapses the camera onto its own look target
         _ray.copy(want).sub(focus).normalize();
@@ -788,17 +900,48 @@ export class StreetEngine {
       want.y = Math.max(want.y, this.player.pos.y + 0.7);
     }
 
+    // Not the lever to reach for when something is arriving too fast: `want`
+    // steps discontinuously the moment a pull-in engages, so winding this up
+    // puts a jolt on every wall in the city. The crane above moves a
+    // continuous quantity, which is why it can afford to be quick.
     const k = 1 - Math.exp(-(aim ? 16 : 9) * dt);
     this.camPos.lerp(want, k);
     this.camLook.lerp(focus, 1 - Math.exp(-14 * dt));
+
+    /*
+     * Last resort. Pulling in is the graceful fix, but it has a floor: at
+     * 1.4m behind the player there is nowhere left to retreat to, and traffic
+     * can cross into that gap faster than any damped rig can vacate it. When
+     * the lens ends up inside a vehicle anyway, ride over its roof instead —
+     * a high angle reads as a camera move, a black screen reads as a bug.
+     *
+     * It is held outside `camPos` so the rig underneath is untouched: the
+     * lift goes up immediately (a frame spent inside a bus is a frame of
+     * black) and eases back down over about half a second once the road is
+     * clear, rather than dropping the moment the bumper passes.
+     */
+    const roof = aim ? -1 : this.city.vehicleRoofAt(this.camPos, 0.5);
+    const need = roof > 0 ? roof + 0.6 - this.camPos.y : 0;
+    /*
+     * Fast, but not instant. The half-metre of padding in the test above is
+     * headroom bought exactly so this can take a few frames without any of
+     * the vehicle reaching the lens — and teleporting the lens a metre
+     * upward in one frame is more jarring than the thing it is avoiding.
+     */
+    this.camLift = Math.min(
+      Math.max(need, this.camLift * Math.exp(-2.5 * dt)),
+      this.camLift + 14 * dt,
+    );
+
     this.camera.position.copy(this.camPos);
+    this.camera.position.y += this.camLift;
     this.camera.lookAt(this.camLook);
 
     // Hide the body once the lens is inside it, rather than the instant the
     // phone goes up — otherwise it pops out from under a still-moving camera.
     const head = this.player.pos.y + this.player.char.dims.hipY + 0.58;
     this.player.char.mesh.visible =
-      this.camPos.distanceTo(
+      this.camera.position.distanceTo(
         _head.set(this.player.pos.x, head, this.player.pos.z),
       ) > 1.15;
 
@@ -825,9 +968,10 @@ export class StreetEngine {
      * Walls first, then vehicles, then walls again — so a bus that has pulled
      * up against you can't shove you through a shopfront.
      */
-    resolveCollisions(this.player.pos, 0.36, this.city.grid);
-    this.city.resolveVehicles(this.player.pos, 0.36);
-    resolveCollisions(this.player.pos, 0.36, this.city.grid);
+    const clear = this.player.clearTop;
+    resolveCollisions(this.player.pos, 0.36, this.city.grid, clear);
+    this.city.resolveVehicles(this.player.pos, 0.36, clear);
+    resolveCollisions(this.player.pos, 0.36, this.city.grid, clear);
     this.stepCrowd(dt);
     this.updateCamera(dt);
     this.city.update(dt, this.elapsed, {

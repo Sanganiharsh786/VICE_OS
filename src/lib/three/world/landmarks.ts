@@ -179,11 +179,26 @@ function stadium(ctx: WorldCtx) {
   markEvidence(ctx, "VICE ARENA", x, 30, z, 34);
 }
 
-/** Observation wheel over the beach. Turns. */
+/**
+ * Observation wheel over the beach. Turns.
+ *
+ * The gondolas and the rim used to be built out of the `neon` bucket, which is
+ * an additive, depth-write-free material whose opacity the day/night cycle
+ * pulls down to 0.32 in daylight. After dark that is exactly right — the wheel
+ * is a ring of light over the water. In daylight it meant the whole ride went
+ * translucent: you could see the sea straight through the cars, and the rim
+ * was a faint smear rather than a structure.
+ *
+ * So the ride is now solid — painted cars on a steel rim, lit by the sun like
+ * everything else — and the neon is reduced to what it should always have
+ * been: a light strip on each car and a tube running round the rim beside it.
+ * Those still fade out at noon, and the fairground underneath them does not.
+ */
 function observationWheel(ctx: WorldCtx) {
   const x = SHORE_X - 46;
   const z = 300;
   const metal = ctx.bank.bucket("metal", ctx.mat.metal);
+  const prop = ctx.bank.bucket("prop", ctx.mat.prop);
   const neon = ctx.bank.bucket("neon", ctx.mat.neon);
   const R = 34;
   const hubY = R + 8;
@@ -195,6 +210,9 @@ function observationWheel(ctx: WorldCtx) {
   }
   metal.cylinder(x, hubY, z, 2.4, 2.4, 14, 10, 0x9a94b0, 0.2);
 
+  /** Fairground paint: what the cars are, before anything is lit. */
+  const LIVERY = [0xe24a86, 0x2fb6d8, 0xf0a63a, 0x7ec845];
+
   const spokes = 20;
   for (let s = 0; s < spokes; s++) {
     const a = (s / spokes) * Math.PI * 2;
@@ -204,24 +222,67 @@ function observationWheel(ctx: WorldCtx) {
     for (const oz of [-3.5, 3.5]) {
       metal.bar(x, hubY, z + oz, ex, ey, z + oz, 0.35, 0x8f89a8);
     }
-    // gondola
-    neon.box(ex, ey - 1.6, z, 2.4, 2.0, 3.2, {
-      tint: [0xff2e97, 0x22e6ff, 0xffb347, 0x9dff3d][s % 4],
-      shade: false,
-    });
+
+    const tint = LIVERY[s % 4];
+    // the hanger the car swings from
+    metal.box(ex, ey - 0.5, z, 0.3, 1.2, 0.3, { tint: 0x9a94b0 });
+    // the car: a painted shell with a glazed band round it
+    prop.box(ex, ey - 1.85, z, 2.4, 1.9, 3.2, { tint, ao: 0.3 });
+    prop.box(ex, ey - 1.6, z, 2.46, 0.9, 3.26, { tint: 0x16202f, shade: false });
+    prop.box(ex, ey - 2.82, z, 2.5, 0.16, 3.3, { tint: 0x6f6a80, shade: false });
+    // and the strip of light along its flank, which is all the neon it needs
+    neon.box(ex, ey - 2.66, z, 2.54, 0.18, 3.34, { tint, shade: false });
   }
-  // rim
+
+  /*
+   * Rim: a steel band, with the light tube running either side of it.
+   *
+   * Every face goes in twice, wound both ways. A bucket quad is single-sided
+   * and these are rings — one winding leaves half the ride invisible depending
+   * on which side of the wheel you happen to be standing on, and there is no
+   * angle from which that is not obvious.
+   */
+  const UV: [number, number, number, number, number, number, number, number] =
+    [0, 0, 1, 0, 1, 1, 0, 1];
+  const bothWays = (
+    b: ReturnType<WorldCtx["bank"]["bucket"]>,
+    a: THREE.Vector3Like,
+    c: THREE.Vector3Like,
+    d: THREE.Vector3Like,
+    e: THREE.Vector3Like,
+    cols: [number, number, number, number],
+  ) => {
+    b.quad(a, c, d, e, UV, cols);
+    b.quad(e, d, c, a, UV, [cols[3], cols[2], cols[1], cols[0]]);
+  };
+
   for (let s = 0; s < spokes * 2; s++) {
     const a0 = (s / (spokes * 2)) * Math.PI * 2;
     const a1 = ((s + 1) / (spokes * 2)) * Math.PI * 2;
-    neon.quad(
-      { x: x + Math.cos(a0) * R, y: hubY + Math.sin(a0) * R, z: z - 0.4 },
-      { x: x + Math.cos(a1) * R, y: hubY + Math.sin(a1) * R, z: z - 0.4 },
-      { x: x + Math.cos(a1) * R, y: hubY + Math.sin(a1) * R, z: z + 0.4 },
-      { x: x + Math.cos(a0) * R, y: hubY + Math.sin(a0) * R, z: z + 0.4 },
-      [0, 0, 1, 0, 1, 1, 0, 1],
-      [0x22e6ff, 0x22e6ff, 0xff2e97, 0xff2e97],
+    const p = (e: number, dz: number, dr: number) => ({
+      x: x + Math.cos(e) * (R + dr),
+      y: hubY + Math.sin(e) * (R + dr),
+      z: z + dz,
+    });
+    bothWays(
+      metal,
+      p(a0, -3.6, 0),
+      p(a1, -3.6, 0),
+      p(a1, 3.6, 0),
+      p(a0, 3.6, 0),
+      [0x8f89a8, 0x8f89a8, 0x7d7896, 0x7d7896],
     );
+    const lit = s % 2 ? 0x22e6ff : 0xff2e97;
+    for (const dz of [-3.7, 3.7]) {
+      bothWays(
+        neon,
+        p(a0, dz, -0.5),
+        p(a1, dz, -0.5),
+        p(a1, dz, 0.9),
+        p(a0, dz, 0.9),
+        [lit, lit, lit, lit],
+      );
+    }
   }
 
   ctx.grid.box(x, z, 38, 16, hubY);

@@ -23,10 +23,18 @@
 
 import * as THREE from "three";
 import type { BoneName, Character } from "./rig";
+import { AIR_CLEAR, STEP_UP } from "./world/collision";
 
 const WALK = 1.55;
 const RUN = 5.1;
 const GRAVITY = 18.5;
+/**
+ * Apex ≈ 0.85m. That number is load-bearing now that a jump can clear things:
+ * from the pavement it takes you over a bench, a bin or a stack of news boxes,
+ * and stops short of the parked stock and the sign posts at 1.15 — whose
+ * colliders are deliberately shorter than the vehicles they stand for, so
+ * landing on one would put you knee-deep in a car roof.
+ */
 const JUMP_V = 5.6;
 
 export type ActorInput = {
@@ -171,6 +179,13 @@ export class Actor {
   private headYaw = 0;
   private headPitch = 0;
 
+  /**
+   * Height of whatever the actor is standing on, asked for at the position it
+   * is standing. Without one every actor walks at y = 0, which is how a jump
+   * used to end up back on the road even when it landed on a bench.
+   */
+  private probe: ((x: number, z: number, clearTop: number) => number) | null = null;
+
   private axes: Record<string, THREE.Vector3> = {};
   private stepCb: ((foot: 0 | 1, pos: THREE.Vector3, speed: number) => void) | null =
     null;
@@ -218,10 +233,30 @@ export class Actor {
     return this.grounded;
   }
 
+  /**
+   * The height below which the world can neither push this actor around nor
+   * hold it up. On the ground it is a kerb above the feet; in the air it rises
+   * with the jump, so a prop is cleared exactly when the feet are over it.
+   */
+  get clearTop() {
+    return this.pos.y + (this.grounded ? STEP_UP : AIR_CLEAR);
+  }
+
+  setGroundProbe(fn: (x: number, z: number, clearTop: number) => number) {
+    this.probe = fn;
+  }
+
+  private groundAt(x: number, z: number) {
+    return this.probe ? this.probe(x, z, this.clearTop) : 0;
+  }
+
   teleport(x: number, z: number, yaw = 0) {
     this.pos.set(x, 0, z);
     this.yaw = yaw;
     this.vel.set(0, 0, 0);
+    this.vy = 0;
+    this.grounded = true;
+    this.pos.y = this.groundAt(x, z);
   }
 
   /* ---------------- physics + intent ---------------- */
@@ -270,12 +305,31 @@ export class Actor {
       this.vy = JUMP_V;
       this.grounded = false;
     }
-    if (!this.grounded) {
+
+    // Horizontal first: the ground that matters is the ground under where the
+    // step lands, not under where it started.
+    this.pos.x += this.vel.x * dt;
+    this.pos.z += this.vel.z * dt;
+
+    const floor = this.groundAt(this.pos.x, this.pos.z);
+    if (this.grounded) {
+      if (floor > this.pos.y) {
+        // stepping up a kerb — damped, or the camera jolts on every one
+        this.pos.y = Math.min(floor, damp(this.pos.y, floor, 20, dt) + 1e-3);
+      } else if (floor < this.pos.y - 0.04) {
+        // walked off the edge of whatever we were on
+        this.grounded = false;
+        this.vy = 0;
+      } else {
+        this.pos.y = floor;
+      }
+    } else {
       this.vy -= GRAVITY * dt;
       this.airTime += dt;
       this.pos.y += this.vy * dt;
-      if (this.pos.y <= 0) {
-        this.pos.y = 0;
+      // only a descent can land — on the way up a low ledge is just cleared
+      if (this.vy <= 0 && this.pos.y <= floor) {
+        this.pos.y = floor;
         this.grounded = true;
         this.landing = Math.min(1, this.airTime * 2.4);
         this.airTime = 0;
@@ -283,9 +337,6 @@ export class Actor {
       }
     }
     this.landing = damp(this.landing, 0, 6.5, dt);
-
-    this.pos.x += this.vel.x * dt;
-    this.pos.z += this.vel.z * dt;
 
     // Gait clock. Frequency comes from speed / stride, so the foot planted on
     // the ground stays exactly where it was put.

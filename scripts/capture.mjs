@@ -61,6 +61,17 @@ async function clickSelector(page, selector) {
   return hit;
 }
 
+/** Holds a key down for `ms`, which is how the engine reads movement and look. */
+async function press(page, code, ms) {
+  await page.keyboard.down(code);
+  await wait(ms);
+  await page.keyboard.up(code);
+  await wait(200);
+}
+
+/** Turns the camera by `radians`. `Q` and `E` swing it at 2.1 rad/s. */
+const turn = (page, code, radians) => press(page, code, (radians / 2.1) * 1000);
+
 async function shot(page, name) {
   await page.screenshot({
     path: `${OUT}/${name}.jpg`,
@@ -148,6 +159,72 @@ async function main() {
     await page.keyboard.up("KeyW");
     await wait(1200);
     await shot(page, "street");
+
+    /*
+     * Two frames of the world itself, from the beachfront.
+     *
+     * The headings below are computed rather than eyeballed. Nothing above
+     * touches the look controls, so the camera is still on the spawn yaw of
+     * -PI/2 and `Q`/`E` swing it at a known 2.1 rad/s — which makes "face the
+     * observation wheel from forty metres down the beach" a division instead
+     * of a number somebody nudged until it looked right. Note that the
+     * movement keys are camera-relative: at this yaw it is `A` that walks
+     * south, not `S`.
+     */
+    await page.keyboard.press("Digit1");
+    await wait(900);
+    // SOUTH BEACH is the tenth landmark, past the end of the number row
+    for (let i = 0; i < 9; i++) {
+      await page.keyboard.press("KeyT");
+      await wait(420);
+    }
+    await page.keyboard.press("KeyC"); // wide -> cinematic, to fit the ride in
+    await wait(400);
+
+    // ~40m south down the beach road: far enough to see all of the wheel
+    await page.keyboard.down("ShiftLeft");
+    await press(page, "KeyA", 8000);
+    await page.keyboard.up("ShiftLeft");
+    await turn(page, "KeyE", 2.1); // back onto the wheel, now north-east of us
+    await press(page, "KeyR", 540); // and up, to get all 76 metres of it in
+    await wait(1800);
+    await shot(page, "boardwalk");
+
+    /*
+     * The vehicles, in daylight and up close.
+     *
+     * Sunset hides half of what is on them — the glazing band, the painted
+     * roof, the tuck over the wheels — behind its own contrast, so this one
+     * frame runs in day and puts the clock back afterwards. Sprinting at the
+     * kerb rather than creeping to a mark is deliberate: the parked stock is
+     * solid, so the run ends with the lens against a wing.
+     */
+    await press(page, "KeyV", 540); // level again
+    await page.keyboard.press("KeyN"); // sunset -> auto
+    await wait(300);
+    await page.keyboard.press("KeyN"); // auto -> day
+    await wait(900);
+    await page.keyboard.press("KeyC"); // cinematic -> shoulder
+    await wait(250);
+    await page.keyboard.press("KeyC"); // shoulder -> wide
+    await wait(250);
+    await turn(page, "KeyQ", 0.53); // straight up the beach road
+    await page.keyboard.down("ShiftLeft");
+    await press(page, "KeyD", 2500); // across to the kerb and its parked stock
+    await page.keyboard.up("ShiftLeft");
+    await wait(1800);
+    await shot(page, "traffic");
+    await page.keyboard.press("KeyN"); // day -> sunset, for everything after
+    await wait(600);
+
+    // back to the avenue for the shutter sequence, which wants a busy frame
+    await page.keyboard.press("Digit2");
+    await wait(1400);
+    await page.keyboard.press("KeyC"); // cinematic -> shoulder, for the phone
+    await page.keyboard.down("KeyW");
+    await wait(2000);
+    await page.keyboard.up("KeyW");
+    await wait(1200);
 
     await clickText(page, "raise phone");
     await wait(2200);

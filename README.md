@@ -58,6 +58,14 @@ functions of a pixel diff.
     <td align="center"><b>02 · Get the bill</b><br><sub>Every subject the lens caught, priced</sub></td>
     <td align="center"><b>03 · Scrub it</b><br><sub>The rail re-reads your canvas as you work</sub></td>
   </tr>
+  <tr>
+    <td colspan="2"><img src="docs/media/boardwalk.jpg" alt="The observation wheel over South Beach at dusk, a steel rim carrying painted gondolas with cyan and pink light tubes round it"></td>
+    <td><img src="docs/media/traffic.jpg" alt="A bus and a taxi at the beachfront kerb in daylight, wheels proud of tucked bodies under painted roofs and dark glazing"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><b>Nowhere is a backdrop</b><br><sub>Every landmark is somewhere you can stand under</sub></td>
+    <td align="center"><b>Eight vehicles, six parts each</b><br><sub>Measured in metres, in six draw calls</sub></td>
+  </tr>
 </table>
 
 ## The loop
@@ -156,10 +164,19 @@ built and animated from numbers at runtime, like everything else in this repo
   tightens as the pace builds.
 - Turning banks the body, acceleration pitches it, landing compresses it, and standing
   still blends into breathing and a slow weight shift.
+- **Footsteps fire off the solver's heel strike**, not off a timer, so they stay locked to
+  the feet from a walk to a sprint without anyone tuning an interval. The surface is read
+  at the foot rather than at the hips, and the road test is the one the roads themselves
+  are built from — so asphalt becomes concrete on exactly the metre the kerb is drawn at,
+  and sand, grass, the harbour decking and the roof of a car you have jumped onto each
+  sound like themselves. Every step is a pitched body and a broadband scuff a few
+  milliseconds apart, detuned a few percent, because two identical footsteps in a row is
+  the thing that gives a loop away.
 
 The same solver drives the player and the whole crowd. Pedestrians walk sidewalk
 waypoints, watch you when you get close, and **break away and run once your heat passes
-45** — which is exactly when you most want a photo of them.
+45** — which is exactly when you most want a photo of them. They are also deliberately
+silent: seven people walking in step with you is a worse artefact than a quiet street.
 
 ### The city
 
@@ -172,17 +189,49 @@ crowd. None of it is authored by hand and none of it is downloaded.
 Roads run along every cell boundary, so the grid *is* the road network. Avenues every
 third line carry four lanes; the streets between them carry two. Vehicles drive numbered
 lanes in a known direction, hold a gap to the car in front, stop behind the line at a red
-signal, and turn only onto roads that exist — which is why the grid ends cleanly at the
-coast instead of driving into the sea. A hundred and forty of them, plus a thousand parked,
-in four draw calls.
+signal, brake for you when you step out in front of them, and turn only onto roads that
+exist — which is why the grid ends cleanly at the coast instead of driving into the sea.
+Seventy-two moving, five hundred and sixty-eight parked, in six draw calls.
+
+<img src="docs/media/traffic.jpg" alt="Daylight on the beachfront: a bus and a taxi at the kerb, wheels standing proud of tucked bodies under painted roofs and dark glazing bands, with the observation wheel's legs over the sand" width="100%">
+
+### What a car is made of
+
+Eight vehicle types — sedan, hatch, SUV, pickup, van, taxi, bus, box truck — each measured
+in metres against the real thing, and each assembled from the same six instanced parts: a
+**hull** that tucks in at the floor, a **greenhouse** that rakes back at the roof, a
+**glazing band** wrapped round one of them, **wheels**, **lamps** and **bumpers**. Only the
+hull and the greenhouse take the paint; the glass is on its own material, because tinting
+it per instance gives a red car red windows.
+
+The parts are what make the silhouette. Wheels stand proud of a body that pulls in above
+them, so a car has a stance instead of hovering. The roof is painted the same as the doors,
+and the glass is a band round the greenhouse rather than the whole of it — which is the
+difference between a car and a black box on a coloured box. The bus's glazing runs round the
+entire hull at 1.9–3.0 m, where a bus's windows actually are, so the band is its windscreen,
+its side lights and its rear window in one piece. The truck's hull is the cargo box and its
+greenhouse is the cab in front of it, which is why its front wheels sit under the cab. The
+band's width is derived from the taper of whatever it wraps, at its own height, so it clears
+the flank by the same 3 cm on a hatchback and on a bus without either of them carrying a
+hand-tuned number.
 
 Beyond that: a continuous beach, boardwalk and pier along the whole east coast, a working
 harbour with gantry cranes and container stacks, a marina, six over-scaled landmarks you
-can navigate by, a distant skyline ring that removes the map edge, and a full day/night
-cycle that turns every window, sign and street lamp on as the sun goes down. The lighting
-defaults to sunset and can be pinned to **day**, **sunset** or **night**, or set to
-**auto** to let the clock run — fog density is part of that palette, at its thinnest after
-dark so the neon two blocks away still reaches you.
+can navigate by, a distant skyline ring that removes the map edge, and a lighting cycle
+that turns every window, sign and street lamp on as the sun drops. It defaults to sunset
+and can be pinned to **day** or **sunset**, or set to **auto** to let the clock swing and
+turn back at dusk — fog density is part of that palette, at its thinnest late on so the
+neon two blocks away still reaches you.
+
+<img src="docs/media/boardwalk.jpg" alt="The observation wheel over South Beach at dusk: a steel rim carrying painted gondolas, with cyan and pink light tubes running round both sides of it" width="100%">
+
+The landmarks are solid in daylight and lit after dark, which sounds obvious and was not.
+The observation wheel used to be built entirely out of the additive, depth-write-free
+material the neon uses, whose opacity the lighting cycle pulls down to a third at noon —
+so at midday you could see the sea through its gondolas. It is a painted fairground ride on
+a steel rim now, and the neon is what it should always have been: a strip on each car and a
+tube round each side of the rim, which still fade out at noon while the ride underneath
+them does not.
 
 There are **no dynamic lights**. Lit windows, neon and lamp spill are emissive geometry
 and additive ground pools, which is what lets the city carry thousands of "lights" at
@@ -207,7 +256,7 @@ without it.
 | `Enter` | take the shot |
 | `C` | camera distance |
 | `T`, `1`–`9`, or the map | travel across the city |
-| `N`, or the HUD chip | daylight / sunset / night |
+| `N`, or the HUD chip | auto / daylight / sunset |
 | `[` `]` | scrub the clock |
 | `X` | back to the seafront |
 | `H` | the full list, in game |
@@ -381,9 +430,12 @@ skyline, water glitter, film grain, chromatic aberration.
 a few milliseconds apart — a mirror slap and a curtain, which is the whole difference between
 a camera and a tap. The radio squelch is the same noise buffer through a narrow band. Heat
 moving is a saw sweeping up when it costs you and down when you cool off, and the shell plays
-it by watching the two numbers rather than teaching six systems to make a noise. Nothing is
-created until the lock screen is tapped, because browsers won't allow it, and `♪` in the
-status bar turns it all off.
+it by watching the two numbers rather than teaching six systems to make a noise. **Footsteps
+are six sounds, one per surface**, each a pitched thump and a filtered scuff a few
+milliseconds apart — asphalt is a slap with almost no pitch to it, concrete rings a little,
+dry sand is pure hiss with no body at all, and a boardwalk is a drum with a person standing
+on it. Nothing is created until the lock screen is tapped, because browsers won't allow it,
+and `♪` in the status bar turns it all off.
 
 **The 3D holds to the same rule.** The humanoid rig, its skinned surface, the city,
 the asphalt, the window grids, the neon signs and the licence plates are all generated
@@ -443,8 +495,14 @@ npm run capture
 ```
 
 [`scripts/capture.mjs`](scripts/capture.mjs) drives the local dev server through the whole loop
-— boot, street, shutter, forensic vision, the lab, the report — with the Chrome already on the
-machine (`puppeteer-core`, nothing bundled). Change the UI, re-run it, and the README catches up.
+— boot, street, the beachfront, shutter, forensic vision, the lab, the report — with the Chrome
+already on the machine (`puppeteer-core`, nothing bundled). Change the UI, re-run it, and the
+README catches up.
+
+The framings are computed rather than nudged. Nothing touches the look controls before the
+street shot, so the camera is still on its spawn yaw, and `Q`/`E` swing it at a known
+2.1 rad/s — which turns "face the observation wheel from forty metres down the beach" into a
+division that survives the next time the spawn or the landmark moves.
 
 ## Try this first
 
@@ -501,12 +559,12 @@ src/
       rig.ts        procedural humanoid — skeleton, skinned surface, weights
       locomotion.ts gait solver, two-bone IK, full-body procedural animation
       city.ts       assembles the world, day/night, the evidence register
-      world/        layout.ts   the tilemap, districts, named places
+      world/        layout.ts   the tilemap, districts, named places, surfaces
                     roads.ts    the road network as data, then as geometry
                     blocks.ts   what fills a city block
                     builder.ts  merged static geometry, world-scaled UVs
                     collision.ts uniform grid: collision + line of sight
-                    traffic.ts  lane-following vehicles and signals
+                    traffic.ts  the fleet: vehicle shapes, lanes and signals
                     crowd.ts    the instanced crowd, and the boats
                     water.ts    ocean shader, beach, piers, harbour, marina
                     landmarks.ts the six things you navigate by
@@ -514,7 +572,7 @@ src/
                     textures.ts every surface, painted into a canvas
                     materials.ts one place for batching and day/night
       engine.ts     renderer, camera rig, crowd, post chain, photo capture
-    audio.ts        every sound in the OS, synthesised — no audio files
+    audio.ts        every sound in the OS — UI, shutter, radio, footsteps
     editorConfig.ts the editor's three vocabularies, tool icons, CDN warm-up
     reel.ts         the scrub reel, filmed to MP4/WebM via MediaRecorder
     art.ts          procedural scenes, booking plates, whole-frame diff

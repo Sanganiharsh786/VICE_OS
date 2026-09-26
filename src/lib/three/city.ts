@@ -39,7 +39,7 @@ import {
 } from "./world/water";
 import { buildLandmarks } from "./world/landmarks";
 import { buildSkyline } from "./world/skyline";
-import { Traffic, type SignalHead } from "./world/traffic";
+import { Traffic, VEHICLES, type SignalHead } from "./world/traffic";
 import { Boats, Crowd } from "./world/crowd";
 import { EXTENT, GRID, LANDMARK_SPOTS } from "./world/layout";
 import { mulberry } from "./world/rng";
@@ -76,10 +76,41 @@ export type City = {
   ) => void;
   /** True if a building stands between these two points. */
   blocked: (from: THREE.Vector3, to: THREE.Vector3) => boolean;
-  /** Distance to the first wall along a segment, or -1. */
-  rayHit: (from: THREE.Vector3, to: THREE.Vector3) => number;
+  /** Distance to the first wall or vehicle along a segment, or -1. */
+  rayHit: (
+    from: THREE.Vector3,
+    to: THREE.Vector3,
+    minTop?: number,
+  ) => number;
+  /**
+   * Distance to the first moving vehicle on a segment, or -1, with the roof
+   * height of whatever was hit written into `out`. Traffic only: the camera
+   * answers a bus differently from the way it answers a wall.
+   */
+  vehicleHit: (
+    from: THREE.Vector3,
+    to: THREE.Vector3,
+    minTop: number,
+    out: { top: number },
+  ) => number;
+  /**
+   * Roof height of the moving vehicle this point is inside, or -1. The camera
+   * uses it to climb out of a bus that has driven into the lens.
+   */
+  vehicleRoofAt: (p: THREE.Vector3, pad?: number) => number;
   /** Pushes an actor out of any moving vehicle it is standing inside. */
-  resolveVehicles: (pos: THREE.Vector3, radius: number) => void;
+  resolveVehicles: (
+    pos: THREE.Vector3,
+    radius: number,
+    clearTop?: number,
+  ) => void;
+  /**
+   * Height of the surface under (x, z) — pavement, kerb, prop or car roof —
+   * counting only what is no higher than `clearTop`.
+   */
+  groundAt: (x: number, z: number, clearTop: number) => number;
+  /** The same, but ignoring traffic: what a pedestrian will stand on. */
+  walkableAt: (x: number, z: number, clearTop: number) => number;
   stats: { buildings: number; colliders: number; draws: number };
   dispose: () => void;
 };
@@ -169,15 +200,26 @@ const PALETTE = [
   { t: 1.0, zen: "#040611", hor: "#120a2e", gnd: "#241344", sun: "#3a4a8a", si: 0.2, hemi: 0.62, fog: "#0d0a22", fd: 0.00055, night: 1 },
 ];
 
-/** The fixed times the player can pin the world to, plus the running clock. */
-export const TIME_MODES = ["auto", "day", "sunset", "night"] as const;
+/**
+ * The fixed times the player can pin the world to, plus the running clock.
+ *
+ * Leonida is a day-and-sunset city: full night was dropped as a mode, and the
+ * running clock turns back at dusk rather than carrying on into the small
+ * hours. Sunset still sits at `night` 0.5 in the palette, so the neon, the
+ * headlights and the lit windows are all still there — it just never goes
+ * black.
+ */
+export const TIME_MODES = ["auto", "day", "sunset"] as const;
 export type TimeMode = (typeof TIME_MODES)[number];
 
 const MODE_TIME: Record<Exclude<TimeMode, "auto">, number> = {
   day: 0.46,
   sunset: 0.79,
-  night: 0.9,
 };
+
+/** The arc the running clock swings through, and back. */
+const AUTO_MIN = 0.32;
+const AUTO_MAX = 0.82;
 
 function samplePalette(t: number) {
   const tod = ((t % 1) + 1) % 1;
@@ -298,21 +340,53 @@ export function buildCity(
   scene.fog = new THREE.FogExp2(0x4a1852, 0.001);
 
   /*
-   * Parked vehicles are solid too. `top` is kept just under the ray test's
-   * threshold so a parked car stops the player walking through it without
-   * yanking the third-person camera in every time you pass one.
+   * Parked vehicles are solid too, at the roof height of the model that is
+   * actually sitting there.
+   *
+   * These used to be pinned at 1.15 — under the camera ray's threshold — so a
+   * parked car would stop the player without hauling the third-person camera
+   * in every time you passed one. That worked for the camera and lied to
+   * everything else: 1.15 is 40cm below a sedan's roof, so landing on one put
+   * you shin-deep in it. The camera now gets told what to ignore directly
+   * (CAMERA_CLEAR in engine.ts) and these can be honest.
    */
   for (const p of parked) {
     const wide = Math.abs(Math.cos(p.rot)) > 0.5;
-    grid.box(p.x, p.z, wide ? 2.1 : 4.9, wide ? 4.9 : 2.1, 1.15);
+    const spec = VEHICLES[Math.min(p.kind, 5)];
+    /*
+     * The footprint is the model's own, not a one-size box. It used to be a
+     * flat 2.1 x 4.9 for everything, which overhangs a hatchback's nose by
+     * half a metre — and the readable number plate is mounted 3cm off that
+     * nose. Harmless while these colliders were too short for the sightline
+     * test to see; at full height it meant a car occluded its own plate and
+     * the shutter stopped recording them as evidence.
+     */
+    grid.box(
+      p.x,
+      p.z,
+      wide ? spec.w : spec.l,
+      wide ? spec.l : spec.w,
+      spec.top,
+      true,
+    );
   }
 
   /* ---- moving parts ---- */
+  /*
+   * Density.
+   *
+   * The whole fleet is held inside a 300-metre bubble around the player (see
+   * Traffic.update), so these counts are not spread over the square kilometre —
+   * they are all on the four or five streets you can actually see. At 140 cars
+   * that read as gridlock rather than a city: junctions stayed blocked and you
+   * couldn't cross a road. Roughly half of it is still a busy Leonida evening,
+   * and the same applies to the pavement.
+   */
   const traffic = keep(
     new Traffic({
       net,
       rnd: mulberry(90210),
-      moving: quality === "high" ? 140 : 60,
+      moving: quality === "high" ? 72 : 32,
       parked,
       heads,
       evidence,
@@ -320,7 +394,7 @@ export function buildCity(
   );
   group.add(traffic.group);
 
-  const crowd = keep(new Crowd(walk, quality === "high" ? 170 : 80));
+  const crowd = keep(new Crowd(walk, quality === "high" ? 85 : 40));
   group.add(crowd.group);
 
   const boats = keep(new Boats(boatRoutes(), moorings, quality === "high" ? 3 : 2));
@@ -381,6 +455,8 @@ export function buildCity(
     night: 0.55,
     /** "auto" runs the clock; the rest pin the world to one lighting setup. */
     mode: "sunset" as TimeMode,
+    /** Which way the running clock is currently travelling. */
+    dir: 1,
   };
   const scratch: Collider[] = [];
   const _from = new THREE.Vector3();
@@ -471,9 +547,21 @@ export function buildCity(
     },
 
     update(dt, t, opts) {
-      // a full Leonida day runs about eight minutes, unless the player has
-      // pinned the lighting to one time
-      if (state.mode === "auto") state.tod = (state.tod + dt / 480) % 1;
+      /*
+       * A full sweep runs about eight minutes, unless the player has pinned
+       * the lighting to one time. It reverses at each end of the arc instead
+       * of wrapping through midnight — morning up to dusk, then back down.
+       */
+      if (state.mode === "auto") {
+        state.tod += (dt / 480) * state.dir;
+        if (state.tod >= AUTO_MAX) {
+          state.tod = AUTO_MAX;
+          state.dir = -1;
+        } else if (state.tod <= AUTO_MIN) {
+          state.tod = AUTO_MIN;
+          state.dir = 1;
+        }
+      }
       applyTime();
 
       // keep the shadow volume on the player, not on the world origin
@@ -494,14 +582,38 @@ export function buildCity(
       }
     },
 
-    resolveVehicles(pos, radius) {
-      traffic.resolveAgainst(pos, radius);
+    resolveVehicles(pos, radius, clearTop) {
+      traffic.resolveAgainst(pos, radius, clearTop);
+    },
+    groundAt(x, z, clearTop) {
+      return Math.max(
+        grid.groundAt(x, z, clearTop, scratch),
+        traffic.roofAt(x, z, clearTop),
+      );
+    },
+    walkableAt(x, z, clearTop) {
+      return grid.groundAt(x, z, clearTop, scratch);
     },
     blocked(from, to) {
       return grid.blocked(from, to);
     },
-    rayHit(from, to) {
-      return grid.rayHit(_from.copy(from), to);
+    rayHit(from, to, minTop) {
+      /*
+       * Walls and traffic, because the camera needs both. `blocked` above
+       * deliberately stays walls-only: a bus drifting through a sightline
+       * should not retroactively invalidate a photo you already framed.
+       */
+      const wall = grid.rayHit(_from.copy(from), to, minTop);
+      const car = traffic.rayHit(_from, to, minTop);
+      if (wall < 0) return car;
+      if (car < 0) return wall;
+      return Math.min(wall, car);
+    },
+    vehicleHit(from, to, minTop, out) {
+      return traffic.rayHit(from, to, minTop, out);
+    },
+    vehicleRoofAt(p, pad) {
+      return traffic.roofOver(p, pad);
     },
 
     dispose() {
@@ -564,13 +676,19 @@ function nearestLamps(
 
 const _scratch: Collider[] = [];
 
-/** Push a capsule out of every wall it overlaps, and keep it on the map. */
+/**
+ * Push a capsule out of every wall it overlaps, and keep it on the map.
+ *
+ * `clearTop` is the height the capsule's feet are carrying: anything shorter is
+ * something it is standing on or jumping over, not something it walks into.
+ */
 export function resolveCollisions(
   pos: THREE.Vector3,
   radius: number,
   grid: CollisionGrid,
+  clearTop?: number,
 ) {
-  grid.resolve(pos, radius, _scratch);
+  grid.resolve(pos, radius, _scratch, clearTop);
   const lim = EXTENT - 2;
   pos.x = Math.max(-lim, Math.min(EXTENT + 44, pos.x));
   pos.z = Math.max(-lim, Math.min(lim, pos.z));
